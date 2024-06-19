@@ -127,7 +127,8 @@ fn find_config_files(
 
     // messages sent from a worker thread
     enum Message {
-        Finished((String, Vec<PathBuf>)),
+        Finished { font: String, configs: Vec<PathBuf> },
+        ErrorMsg(String),
         RateLimit(usize),
     }
 
@@ -156,17 +157,38 @@ fn find_config_files(
                     // then try to get configs (which may trigger rate limiting)
                     match config_file_name(&repo, checkout_font_dir) {
                         Ok(configs) => {
-                            tx.send(Message::Finished((name, configs))).unwrap();
+                            tx.send(Message::Finished {
+                                font: name,
+                                configs,
+                            })
+                            .unwrap();
+                            break;
+                        }
+                        Err(ConfigFetchIssue::NoConfigFound) => {
+                            tx.send(Message::Finished {
+                                font: name,
+                                configs: Default::default(),
+                            })
+                            .unwrap();
                             break;
                         }
                         // if we're rate limited, set the flag telling other threads
-                        // to spin, sleep, and then set the flag again
-                        Err(backoff) => {
+                        // to spin, sleep, and then unset the flag
+                        Err(ConfigFetchIssue::RateLimit(backoff)) => {
                             if !rate_limited.swap(true, Ordering::Acquire) {
                                 tx.send(Message::RateLimit(backoff)).unwrap();
                                 std::thread::sleep(Duration::from_secs(backoff as _));
                                 rate_limited.store(false, Ordering::Release);
                             }
+                        }
+                        Err(e) => {
+                            let msg = match e {
+                                ConfigFetchIssue::BadRepoUrl(s) | ConfigFetchIssue::GitFail(s) => s,
+                                ConfigFetchIssue::Http(e) => e.to_string(),
+                                _ => unreachable!(), // handled above
+                            };
+                            tx.send(Message::ErrorMsg(msg)).unwrap();
+                            break;
                         }
                     }
                 }
@@ -176,9 +198,9 @@ fn find_config_files(
 
         while seen < sent {
             match rx.recv() {
-                Ok(Message::Finished((name, configs))) => {
+                Ok(Message::Finished { font, configs }) => {
                     if !configs.is_empty() {
-                        result.insert(name, configs);
+                        result.insert(font, configs);
                     }
                     seen += 1;
                 }
@@ -200,6 +222,10 @@ fn find_config_files(
                         limit_progress.update(1).unwrap();
                     }
                 }
+                Ok(Message::ErrorMsg(msg)) => {
+                    progressbar.write(msg).unwrap();
+                    seen += 1;
+                }
                 Err(e) => {
                     eprintln!("channel error: '{e}'");
                     break;
@@ -211,22 +237,38 @@ fn find_config_files(
     })
 }
 
+#[derive(Debug)]
+enum ConfigFetchIssue {
+    NoConfigFound,
+    RateLimit(usize),
+    BadRepoUrl(String),
+    // contains stderr
+    GitFail(String),
+    Http(ureq::Error),
+}
+
 // error is number of seconds to wait if we're rate-limited
-fn config_file_name(repo_url: &str, checkout_font_dir: &Path) -> Result<Vec<PathBuf>, usize> {
-    Ok(has_config_file_naive(repo_url)?
-        .map(|p| vec![p])
-        .or_else(|| has_config_file_checkout(repo_url, checkout_font_dir))
-        .unwrap_or_default())
+fn config_file_name(
+    repo_url: &str,
+    checkout_font_dir: &Path,
+) -> Result<Vec<PathBuf>, ConfigFetchIssue> {
+    let naive = has_config_file_naive(repo_url).map(|p| vec![p]);
+    // if not found, try checking out and looking; otherwise return the result
+    if !matches!(naive, Err(ConfigFetchIssue::NoConfigFound)) {
+        naive
+    } else {
+        has_config_file_checkout(repo_url, checkout_font_dir)
+    }
 }
 
 // just check for the presence of the most common file names
-fn has_config_file_naive(repo_url: &str) -> Result<Option<PathBuf>, usize> {
+fn has_config_file_naive(repo_url: &str) -> Result<PathBuf, ConfigFetchIssue> {
     for filename in ["config.yaml", "config.yml"] {
         let config_url = format!("{repo_url}/tree/HEAD/sources/{filename}");
         let req = ureq::head(&config_url);
 
         match req.call() {
-            Ok(resp) if resp.status() == 200 => return Ok(Some(filename.into())),
+            Ok(resp) if resp.status() == 200 => return Ok(filename.into()),
             Ok(resp) => {
                 eprintln!("{repo_url}: {}", resp.status());
             }
@@ -236,21 +278,22 @@ fn has_config_file_naive(repo_url: &str) -> Result<Option<PathBuf>, usize> {
                     .header("Retry-After")
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(60);
-                return Err(backoff);
+                return Err(ConfigFetchIssue::RateLimit(backoff));
             }
             Err(e) => {
-                eprintln!("{repo_url}: err '{e}'");
-                return Ok(None);
+                return Err(ConfigFetchIssue::Http(e));
             }
         }
     }
-    Ok(None)
+    Err(ConfigFetchIssue::NoConfigFound)
 }
 
-fn has_config_file_checkout(repo_url: &str, checkout_font_dir: &Path) -> Option<Vec<PathBuf>> {
+fn has_config_file_checkout(
+    repo_url: &str,
+    checkout_font_dir: &Path,
+) -> Result<Vec<PathBuf>, ConfigFetchIssue> {
     let Some((_, repo_name)) = repo_url.rsplit_once('/') else {
-        eprintln!("bad repo name: '{repo_url}'");
-        return None;
+        return Err(ConfigFetchIssue::BadRepoUrl(repo_url.into()));
     };
 
     let out_path = checkout_font_dir.join(repo_name);
@@ -258,11 +301,9 @@ fn has_config_file_checkout(repo_url: &str, checkout_font_dir: &Path) -> Option<
         // should we always fetch? idk
     } else {
         std::fs::create_dir_all(&out_path).unwrap();
-        if let Err(e) = clone_repo(repo_url, &out_path) {
-            eprintln!("checkout '{repo_url}' failed: '{e}'");
-        }
+        clone_repo(repo_url, &out_path).map_err(ConfigFetchIssue::GitFail)?;
     }
-    get_config_paths(&out_path)
+    get_config_paths(&out_path).ok_or(ConfigFetchIssue::NoConfigFound)
 }
 
 /// Look for a file like 'config.yaml' in a google fonts font checkout.
@@ -358,7 +399,10 @@ mod tests {
 
     #[test]
     fn naive_config() {
-        assert!(has_config_file_naive("https://github.com/PaoloBiagini/Joan").is_some());
-        assert!(has_config_file_naive("https://github.com/googlefonts/bangers").is_none());
+        assert!(has_config_file_naive("https://github.com/PaoloBiagini/Joan").is_ok());
+        assert!(matches!(
+            has_config_file_naive("https://github.com/googlefonts/bangers"),
+            Err(ConfigFetchIssue::NoConfigFound)
+        ));
     }
 }
