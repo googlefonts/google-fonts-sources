@@ -1,7 +1,7 @@
 //! Finding sources for Google Fonts fonts
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -38,15 +38,41 @@ pub struct RepoInfo {
     pub config_files: Vec<PathBuf>,
 }
 
-pub fn generate_sources_list(args: &Args) -> Vec<RepoInfo> {
+/// entry point for the cli tool
+pub fn run(args: &Args) {
+    let repos = discover_sources(args);
+    let output = if args.list {
+        let urls = repos.into_iter().map(|r| r.repo_url).collect::<Vec<_>>();
+        urls.join("\n")
+    } else {
+        jsonify(repos)
+    };
+
+    if let Some(out) = args.out.as_ref() {
+        std::fs::write(out, output).unwrap_or_die(|e| eprintln!("failed to write output: '{e}'"));
+    } else {
+        println!("{output}")
+    }
+}
+
+/// Discover repositories containing font source files.
+///
+/// This looks at every font in the google/fonts github repo, looks to see if
+/// we have a known upstream repository for that font, and then looks to see if
+/// that repo contains a config.yaml file.
+pub fn discover_sources(args: &Args) -> Vec<RepoInfo> {
     // before starting work make sure we have a github token:
     let candidates = match args.repo_path.as_deref() {
-        Some(path) => get_candidates_from_local_checkout(path),
-        None => get_candidates_from_remote(),
+        Some(path) => get_candidates_from_local_checkout(path, args.verbose),
+        None => get_candidates_from_remote(args.verbose),
     };
 
     let have_repo = pruned_candidates(&candidates);
 
+    eprintln!(
+        "checking {} repositories for config.yaml files",
+        have_repo.len()
+    );
     let has_config_files = if let Some(font_path) = args.fonts_dir.as_ref() {
         find_config_files(&have_repo, &font_path)
     } else {
@@ -54,17 +80,19 @@ pub fn generate_sources_list(args: &Args) -> Vec<RepoInfo> {
         find_config_files(&have_repo, tempdir.path())
     };
 
-    println!(
-        "{} of {} candidates have known repo url",
-        have_repo.len(),
-        candidates.len()
-    );
+    if args.verbose {
+        eprintln!(
+            "{} of {} candidates have known repo url",
+            have_repo.len(),
+            candidates.len()
+        );
 
-    println!(
-        "{} of {} have sources/config.yaml",
-        has_config_files.len(),
-        have_repo.len()
-    );
+        eprintln!(
+            "{} of {} have sources/config.yaml",
+            has_config_files.len(),
+            have_repo.len()
+        );
+    }
 
     let mut repos: Vec<_> = have_repo
         .iter()
@@ -79,8 +107,20 @@ pub fn generate_sources_list(args: &Args) -> Vec<RepoInfo> {
 
     repos.sort();
     repos
+}
 
-    // now what do we actually want to generate?
+// no need to bring in serde + derive for this
+fn jsonify(repos: Vec<RepoInfo>) -> String {
+    let mut json = Vec::with_capacity(repos.len());
+    for repo in repos {
+        json.push(serde_json::json! ({
+            "name": repo.font_name,
+            "url": repo.repo_url,
+            "config_files": repo.config_files
+        }));
+    }
+
+    serde_json::to_string_pretty(&json).unwrap()
 }
 
 fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
@@ -216,6 +256,10 @@ fn find_config_files(
     })
 }
 
+/// Conditions under which we fail to find a config.
+///
+/// different conditions are handled differently; NoConfigFound is fine,
+/// RateLimit means we need to wait and retry, other things are errors we report
 #[derive(Debug)]
 enum ConfigFetchIssue {
     NoConfigFound,
@@ -249,7 +293,8 @@ fn has_config_file_naive(repo_url: &str) -> Result<PathBuf, ConfigFetchIssue> {
         match req.call() {
             Ok(resp) if resp.status() == 200 => return Ok(filename.into()),
             Ok(resp) => {
-                eprintln!("{repo_url}: {}", resp.status());
+                // seems very unlikely but it feels bad to just skip this branch?
+                eprintln!("unexpected response code for {repo_url}: {}", resp.status());
             }
             Err(ureq::Error::Status(404, _)) => (),
             Err(ureq::Error::Status(429, resp)) => {
@@ -312,26 +357,28 @@ fn get_config_paths(font_dir: &Path) -> Option<Vec<PathBuf>> {
         .filter(looks_like_config_file)
         .collect::<Vec<_>>();
 
-    // if multiple exist just... take the shortest one?
     config_files.sort_by_key(|p| p.to_str().map(|s| s.len()).unwrap_or(usize::MAX));
     Some(config_files)
 }
 
-fn get_candidates_from_remote() -> BTreeSet<Metadata> {
+fn get_candidates_from_remote(verbose: bool) -> BTreeSet<Metadata> {
     let tempdir = tempfile::tempdir().unwrap();
+    eprintln!("cloning {GF_REPO_URL} to {}", tempdir.path().display());
     clone_repo(GF_REPO_URL, tempdir.path())
         .unwrap_or_die(|e| eprintln!("failed to checkout {GF_REPO_URL}: '{e}'"));
-    get_candidates_from_local_checkout(tempdir.path())
+    get_candidates_from_local_checkout(tempdir.path(), verbose)
 }
 
-fn get_candidates_from_local_checkout(path: &Path) -> BTreeSet<Metadata> {
+fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Metadata> {
     let ofl_dir = path.join("ofl");
     let mut result = BTreeSet::new();
     for font_dir in iter_ofl_subdirectories(&ofl_dir) {
         let metadata = match load_metadata(&font_dir) {
             Ok(metadata) => metadata,
             Err(e) => {
-                eprintln!("no metadata for font {}: '{}'", font_dir.display(), e);
+                if verbose {
+                    eprintln!("no metadata for font {}: '{}'", font_dir.display(), e);
+                }
                 continue;
             }
         };
