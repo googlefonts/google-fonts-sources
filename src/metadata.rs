@@ -8,7 +8,7 @@ use std::{fmt::Display, str::FromStr};
 // in the future we would like to generate a type for this from the protobuf definition
 // but there's no official rust protobuf impl, and no informal impl correctly
 // handles the protobuf text format
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Metadata {
     pub(crate) name: String,
     pub(crate) repo_url: Option<String>,

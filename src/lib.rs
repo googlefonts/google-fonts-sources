@@ -1,10 +1,17 @@
 //! Finding sources for Google Fonts fonts
 
-use kdam::BarExt;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::channel,
+        Arc,
+    },
+    time::Duration,
 };
+
+use kdam::{tqdm, BarExt};
 
 mod args;
 mod error;
@@ -18,10 +25,16 @@ static GF_REPO_URL: &str = "https://github.com/google/fonts";
 static METADATA_FILE: &str = "METADATA.pb";
 static TOKEN_VAR: &str = "GH_TOKEN";
 
-//TODO: figure out what this returns
-pub fn generate_sources_list(args: &Args) -> () {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RepoInfo {
+    font_name: String,
+    repo_url: String,
+    config_files: Vec<PathBuf>,
+}
+
+pub fn generate_sources_list(args: &Args) -> Vec<RepoInfo> {
     // before starting work make sure we have a github token:
-    let token = get_gh_token_or_die(args.gh_token_path.as_deref());
+    //let token = get_gh_token_or_die(args.gh_token_path.as_deref());
     let candidates = match args.repo_path.as_deref() {
         Some(path) => get_candidates_from_local_checkout(path),
         None => get_candidates_from_remote(),
@@ -30,10 +43,10 @@ pub fn generate_sources_list(args: &Args) -> () {
     let have_repo = pruned_candidates(&candidates);
 
     let has_config_files = if let Some(font_path) = args.fonts_dir.as_ref() {
-        find_config_files(&candidates, &token, &font_path)
+        find_config_files(&have_repo, &font_path)
     } else {
         let tempdir = tempfile::tempdir().unwrap();
-        find_config_files(&candidates, &token, tempdir.path())
+        find_config_files(&have_repo, tempdir.path())
     };
 
     println!(
@@ -48,21 +61,33 @@ pub fn generate_sources_list(args: &Args) -> () {
         have_repo.len()
     );
 
-    report_config_stats(&has_config_files)
+    let mut repos: Vec<_> = have_repo
+        .iter()
+        .filter_map(|meta| {
+            has_config_files.get(&meta.name).map(|configs| RepoInfo {
+                font_name: meta.name.clone(),
+                repo_url: meta.repo_url.clone().unwrap(),
+                config_files: configs.clone(),
+            })
+        })
+        .collect();
+
+    repos.sort();
+    repos
+
+    // now what do we actually want to generate?
 }
 
-fn pruned_candidates(candidates: &BTreeMap<String, Metadata>) -> BTreeMap<String, Metadata> {
+fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
     let mut seen_repos = HashSet::new();
-    let mut result = BTreeMap::new();
-    for metadata in candidates.values() {
+    let mut result = BTreeSet::new();
+    for metadata in candidates {
         let Some(url) = metadata.repo_url.as_ref() else {
             continue;
         };
 
         if seen_repos.insert(url) {
-            result.insert(metadata.name.clone(), metadata.clone());
-        } else {
-            eprintln!("duplicate repo '{url}' for font {}", metadata.name);
+            result.insert(metadata.clone());
         }
     }
     result
@@ -86,6 +111,7 @@ fn report_config_stats(configs: &BTreeMap<String, Vec<PathBuf>>) {
 fn get_gh_token_or_die(token_path: Option<&Path>) -> String {
     match token_path {
         Some(path) => std::fs::read_to_string(path)
+            .map(|s| s.trim().to_owned())
             .unwrap_or_die(|e| eprintln!("could not read file at {}: '{e}'", path.display())),
         None => std::env::var(TOKEN_VAR).unwrap_or_die(|_| {
             eprintln!("please provide a github auth token via --gh_token arg or GH_TOKEN env var")
@@ -94,60 +120,134 @@ fn get_gh_token_or_die(token_path: Option<&Path>) -> String {
 }
 
 fn find_config_files(
-    fonts: &BTreeMap<String, Metadata>,
-    token: &str,
+    fonts: &BTreeSet<Metadata>,
     checkout_font_dir: &Path,
 ) -> BTreeMap<String, Vec<PathBuf>> {
-    let n_has_repo = fonts.values().filter(|md| md.repo_url.is_some()).count();
-    let mut result = BTreeMap::new();
-    let mut progressbar = kdam::tqdm!(total = n_has_repo);
-    for (name, repo) in fonts
-        .iter()
-        .filter_map(|(name, meta)| meta.repo_url.as_ref().map(|repo| (name, repo)))
-    {
-        if let Some(config) = config_file_name(&repo, token, checkout_font_dir) {
-            result.insert(name.clone(), config);
-        }
-        progressbar.update(1).unwrap();
+    let n_has_repo = fonts.iter().filter(|md| md.repo_url.is_some()).count();
+
+    // messages sent from a worker thread
+    enum Message {
+        Finished((String, Vec<PathBuf>)),
+        RateLimit(usize),
     }
-    result
+
+    rayon::scope(|s| {
+        let mut result = BTreeMap::new();
+        let mut seen = 0;
+        let mut sent = 0;
+        let mut progressbar = kdam::tqdm!(total = n_has_repo);
+        let rate_limited = Arc::new(AtomicBool::new(false));
+
+        let (tx, rx) = channel();
+        for (name, repo) in fonts
+            .iter()
+            .filter_map(|meta| meta.repo_url.as_ref().map(|repo| (&meta.name, repo)))
+        {
+            let repo = repo.clone();
+            let name = name.clone();
+            let tx = tx.clone();
+            let rate_limited = rate_limited.clone();
+            s.spawn(move |_| {
+                loop {
+                    // first, if we're currently rate-limited we spin:
+                    while rate_limited.load(Ordering::Acquire) {
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    // then try to get configs (which may trigger rate limiting)
+                    match config_file_name(&repo, checkout_font_dir) {
+                        Ok(configs) => {
+                            tx.send(Message::Finished((name, configs))).unwrap();
+                            break;
+                        }
+                        // if we're rate limited, set the flag telling other threads
+                        // to spin, sleep, and then set the flag again
+                        Err(backoff) => {
+                            if !rate_limited.swap(true, Ordering::Acquire) {
+                                tx.send(Message::RateLimit(backoff)).unwrap();
+                                std::thread::sleep(Duration::from_secs(backoff as _));
+                                rate_limited.store(false, Ordering::Release);
+                            }
+                        }
+                    }
+                }
+            });
+            sent += 1;
+        }
+
+        while seen < sent {
+            match rx.recv() {
+                Ok(Message::Finished((name, configs))) => {
+                    if !configs.is_empty() {
+                        result.insert(name, configs);
+                    }
+                    seen += 1;
+                }
+                Ok(Message::RateLimit(seconds)) => {
+                    progressbar
+                        .write(format!(
+                            "rate limit hit, cooling down for {seconds} seconds"
+                        ))
+                        .unwrap();
+                    let mut limit_progress = tqdm!(
+                        total = seconds,
+                        desc = "cooldown",
+                        position = 1,
+                        leave = false,
+                        bar_format = "{desc}|{animation}| {count}/{total}"
+                    );
+                    for _ in 0..seconds {
+                        std::thread::sleep(Duration::from_secs(1));
+                        limit_progress.update(1).unwrap();
+                    }
+                }
+                Err(e) => {
+                    eprintln!("channel error: '{e}'");
+                    break;
+                }
+            }
+            progressbar.update(1).unwrap();
+        }
+        result
+    })
 }
 
-fn config_file_name(repo_url: &str, token: &str, checkout_font_dir: &Path) -> Option<Vec<PathBuf>> {
-    has_config_file_naive(repo_url, None)
+// error is number of seconds to wait if we're rate-limited
+fn config_file_name(repo_url: &str, checkout_font_dir: &Path) -> Result<Vec<PathBuf>, usize> {
+    Ok(has_config_file_naive(repo_url)?
         .map(|p| vec![p])
-        .or_else(|| has_config_file_checkout(repo_url, token, checkout_font_dir))
+        .or_else(|| has_config_file_checkout(repo_url, checkout_font_dir))
+        .unwrap_or_default())
 }
 
 // just check for the presence of the most common file names
-fn has_config_file_naive(repo_url: &str, token: Option<&str>) -> Option<PathBuf> {
+fn has_config_file_naive(repo_url: &str) -> Result<Option<PathBuf>, usize> {
     for filename in ["config.yaml", "config.yml"] {
         let config_url = format!("{repo_url}/tree/HEAD/sources/{filename}");
-        let mut req = ureq::head(&config_url);
-        if let Some(token) = token {
-            req = req.set("Authorization: Bearer", token);
-        }
+        let req = ureq::head(&config_url);
 
         match req.call() {
-            Ok(resp) if resp.status() == 200 => return Some(filename.into()),
+            Ok(resp) if resp.status() == 200 => return Ok(Some(filename.into())),
             Ok(resp) => {
                 eprintln!("{repo_url}: {}", resp.status());
             }
             Err(ureq::Error::Status(404, _)) => (),
+            Err(ureq::Error::Status(429, resp)) => {
+                let backoff = resp
+                    .header("Retry-After")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(60);
+                return Err(backoff);
+            }
             Err(e) => {
                 eprintln!("{repo_url}: err '{e}'");
-                return None;
+                return Ok(None);
             }
         }
     }
-    None
+    Ok(None)
 }
 
-fn has_config_file_checkout(
-    repo_url: &str,
-    token: &str,
-    checkout_font_dir: &Path,
-) -> Option<Vec<PathBuf>> {
+fn has_config_file_checkout(repo_url: &str, checkout_font_dir: &Path) -> Option<Vec<PathBuf>> {
     let Some((_, repo_name)) = repo_url.rsplit_once('/') else {
         eprintln!("bad repo name: '{repo_url}'");
         return None;
@@ -197,16 +297,16 @@ fn get_config_paths(font_dir: &Path) -> Option<Vec<PathBuf>> {
     Some(config_files)
 }
 
-fn get_candidates_from_remote() -> BTreeMap<String, Metadata> {
+fn get_candidates_from_remote() -> BTreeSet<Metadata> {
     let tempdir = tempfile::tempdir().unwrap();
     clone_repo(GF_REPO_URL, tempdir.path())
         .unwrap_or_die(|e| eprintln!("failed to checkout {GF_REPO_URL}: '{e}'"));
     get_candidates_from_local_checkout(tempdir.path())
 }
 
-fn get_candidates_from_local_checkout(path: &Path) -> BTreeMap<String, Metadata> {
+fn get_candidates_from_local_checkout(path: &Path) -> BTreeSet<Metadata> {
     let ofl_dir = path.join("ofl");
-    let mut result = BTreeMap::new();
+    let mut result = BTreeSet::new();
     for font_dir in iter_ofl_subdirectories(&ofl_dir) {
         let metadata = match load_metadata(&font_dir) {
             Ok(metadata) => metadata,
@@ -215,7 +315,7 @@ fn get_candidates_from_local_checkout(path: &Path) -> BTreeMap<String, Metadata>
                 continue;
             }
         };
-        result.insert(metadata.name.clone(), metadata);
+        result.insert(metadata);
     }
     result
 }
@@ -258,7 +358,7 @@ mod tests {
 
     #[test]
     fn naive_config() {
-        assert!(has_config_file_naive("https://github.com/PaoloBiagini/Joan", None).is_some());
-        assert!(has_config_file_naive("https://github.com/googlefonts/bangers", None).is_none());
+        assert!(has_config_file_naive("https://github.com/PaoloBiagini/Joan").is_some());
+        assert!(has_config_file_naive("https://github.com/googlefonts/bangers").is_none());
     }
 }
