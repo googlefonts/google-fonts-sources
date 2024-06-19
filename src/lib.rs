@@ -23,18 +23,23 @@ use metadata::Metadata;
 
 static GF_REPO_URL: &str = "https://github.com/google/fonts";
 static METADATA_FILE: &str = "METADATA.pb";
-static TOKEN_VAR: &str = "GH_TOKEN";
 
+/// Information about a font repository
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RepoInfo {
-    font_name: String,
-    repo_url: String,
-    config_files: Vec<PathBuf>,
+    /// The name of the font.
+    ///
+    /// Multiple fonts may live in the same repository; this is the name of
+    /// one of the fonts.
+    pub font_name: String,
+    /// The repository's url
+    pub repo_url: String,
+    /// The names of config files that exist in this repository's source directory
+    pub config_files: Vec<PathBuf>,
 }
 
 pub fn generate_sources_list(args: &Args) -> Vec<RepoInfo> {
     // before starting work make sure we have a github token:
-    //let token = get_gh_token_or_die(args.gh_token_path.as_deref());
     let candidates = match args.repo_path.as_deref() {
         Some(path) => get_candidates_from_local_checkout(path),
         None => get_candidates_from_remote(),
@@ -91,32 +96,6 @@ fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
         }
     }
     result
-}
-
-fn report_config_stats(configs: &BTreeMap<String, Vec<PathBuf>>) {
-    let mut counts = HashMap::new();
-    for (_, filenames) in configs {
-        for filename in filenames {
-            *counts.entry(filename).or_insert(0_usize) += 1;
-        }
-    }
-    let mut tovec = counts.into_iter().collect::<Vec<_>>();
-    tovec.sort_by_key(|(_, n)| *n);
-    tovec.reverse();
-    for (filename, count) in tovec {
-        eprintln!("{count:<3} {}", filename.display())
-    }
-}
-
-fn get_gh_token_or_die(token_path: Option<&Path>) -> String {
-    match token_path {
-        Some(path) => std::fs::read_to_string(path)
-            .map(|s| s.trim().to_owned())
-            .unwrap_or_die(|e| eprintln!("could not read file at {}: '{e}'", path.display())),
-        None => std::env::var(TOKEN_VAR).unwrap_or_die(|_| {
-            eprintln!("please provide a github auth token via --gh_token arg or GH_TOKEN env var")
-        }),
-    }
 }
 
 fn find_config_files(
