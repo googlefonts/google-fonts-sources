@@ -123,6 +123,7 @@ fn jsonify(repos: Vec<RepoInfo>) -> String {
     serde_json::to_string_pretty(&json).unwrap()
 }
 
+/// Returns the set of candidates that have a unique repository URL
 fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
     let mut seen_repos = HashSet::new();
     let mut result = BTreeSet::new();
@@ -138,6 +139,18 @@ fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
     result
 }
 
+/// for each font for which we have metadata, check remote repository for a config file.
+///
+/// By convention repositories containing sources we use should have a config file
+/// in the sources/ directory.
+///
+/// This file is often called 'config.yaml', but it may be another name starting with
+/// 'config' (because multiple such files can exist) and it may also use 'yml'
+/// as an extension.
+///
+/// We naively look for the most common file names using a simple http request,
+/// and if we don't find anything then we clone the repo locally and inspect
+/// its contents.
 fn find_config_files(
     fonts: &BTreeSet<Metadata>,
     checkout_font_dir: &Path,
@@ -174,7 +187,7 @@ fn find_config_files(
                         std::thread::sleep(Duration::from_secs(1));
                     }
                     // then try to get configs (which may trigger rate limiting)
-                    match config_file_name(&repo, checkout_font_dir) {
+                    match config_files_for_repo(&repo, checkout_font_dir) {
                         Ok(configs) => {
                             tx.send(Message::Finished {
                                 font: name,
@@ -270,22 +283,33 @@ enum ConfigFetchIssue {
     Http(ureq::Error),
 }
 
-// error is number of seconds to wait if we're rate-limited
-fn config_file_name(
+/// Checks for a config file in a given repo.
+fn config_files_for_repo(
     repo_url: &str,
     checkout_font_dir: &Path,
 ) -> Result<Vec<PathBuf>, ConfigFetchIssue> {
-    let naive = has_config_file_naive(repo_url).map(|p| vec![p]);
+    let Some((_, repo_name)) = repo_url.rsplit_once('/') else {
+        return Err(ConfigFetchIssue::BadRepoUrl(repo_url.into()));
+    };
+
+    let local_repo_dir = checkout_font_dir.join(repo_name);
+    // - if local repo already exists, then look there
+    // - otherwise try naive http requests first,
+    // - and then finally clone the repo and look
+    let local_git_dir = local_repo_dir.join(".git");
+    if local_git_dir.exists() {}
+
+    let naive = config_file_from_remote_naive(repo_url).map(|p| vec![p]);
     // if not found, try checking out and looking; otherwise return the result
     if !matches!(naive, Err(ConfigFetchIssue::NoConfigFound)) {
         naive
     } else {
-        has_config_file_checkout(repo_url, checkout_font_dir)
+        config_files_from_local_checkout(repo_url, &local_repo_dir)
     }
 }
 
 // just check for the presence of the most common file names
-fn has_config_file_naive(repo_url: &str) -> Result<PathBuf, ConfigFetchIssue> {
+fn config_file_from_remote_naive(repo_url: &str) -> Result<PathBuf, ConfigFetchIssue> {
     for filename in ["config.yaml", "config.yml"] {
         let config_url = format!("{repo_url}/tree/HEAD/sources/{filename}");
         let req = ureq::head(&config_url);
@@ -312,22 +336,17 @@ fn has_config_file_naive(repo_url: &str) -> Result<PathBuf, ConfigFetchIssue> {
     Err(ConfigFetchIssue::NoConfigFound)
 }
 
-fn has_config_file_checkout(
+fn config_files_from_local_checkout(
     repo_url: &str,
-    checkout_font_dir: &Path,
+    local_repo_dir: &Path,
 ) -> Result<Vec<PathBuf>, ConfigFetchIssue> {
-    let Some((_, repo_name)) = repo_url.rsplit_once('/') else {
-        return Err(ConfigFetchIssue::BadRepoUrl(repo_url.into()));
-    };
-
-    let out_path = checkout_font_dir.join(repo_name);
-    if out_path.exists() {
+    if local_repo_dir.exists() {
         // should we always fetch? idk
     } else {
-        std::fs::create_dir_all(&out_path).unwrap();
-        clone_repo(repo_url, &out_path).map_err(ConfigFetchIssue::GitFail)?;
+        std::fs::create_dir_all(local_repo_dir).unwrap();
+        clone_repo(repo_url, local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
     }
-    get_config_paths(&out_path).ok_or(ConfigFetchIssue::NoConfigFound)
+    get_config_paths(local_repo_dir).ok_or(ConfigFetchIssue::NoConfigFound)
 }
 
 /// Look for a file like 'config.yaml' in a google fonts font checkout.
@@ -363,7 +382,9 @@ fn get_config_paths(font_dir: &Path) -> Option<Vec<PathBuf>> {
 
 fn get_candidates_from_remote(verbose: bool) -> BTreeSet<Metadata> {
     let tempdir = tempfile::tempdir().unwrap();
-    eprintln!("cloning {GF_REPO_URL} to {}", tempdir.path().display());
+    if verbose {
+        eprintln!("cloning {GF_REPO_URL} to {}", tempdir.path().display());
+    }
     clone_repo(GF_REPO_URL, tempdir.path())
         .unwrap_or_die(|e| eprintln!("failed to checkout {GF_REPO_URL}: '{e}'"));
     get_candidates_from_local_checkout(tempdir.path(), verbose)
@@ -389,8 +410,7 @@ fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Me
 
 fn load_metadata(path: &Path) -> Result<Metadata, MetadataError> {
     let meta_path = path.join(METADATA_FILE);
-    let string = std::fs::read_to_string(meta_path).map_err(MetadataError::Read)?;
-    string.parse().map_err(MetadataError::Parse)
+    Metadata::load(&meta_path)
 }
 
 fn iter_ofl_subdirectories(path: &Path) -> impl Iterator<Item = PathBuf> {
@@ -425,9 +445,9 @@ mod tests {
 
     #[test]
     fn naive_config() {
-        assert!(has_config_file_naive("https://github.com/PaoloBiagini/Joan").is_ok());
+        assert!(config_file_from_remote_naive("https://github.com/PaoloBiagini/Joan").is_ok());
         assert!(matches!(
-            has_config_file_naive("https://github.com/googlefonts/bangers"),
+            config_file_from_remote_naive("https://github.com/googlefonts/bangers"),
             Err(ConfigFetchIssue::NoConfigFound)
         ));
     }

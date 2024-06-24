@@ -3,7 +3,9 @@
 //! this format is defined at
 //! <https://github.com/googlefonts/gftools/blob/main/Lib/gftools/fonts_public.proto>
 
-use std::{fmt::Display, str::FromStr};
+use std::{fmt::Display, path::Path, str::FromStr};
+
+use crate::error::MetadataError;
 
 // in the future we would like to generate a type for this from the protobuf definition
 // but there's no official rust protobuf impl, and no informal impl correctly
@@ -14,8 +16,17 @@ pub(crate) struct Metadata {
     pub(crate) repo_url: Option<String>,
 }
 
+/// Ways parsing metadata can fail
 pub(crate) enum BadMetadata {
+    /// The required 'name' field was missing
     NoName,
+}
+
+impl Metadata {
+    pub fn load(path: &Path) -> Result<Self, MetadataError> {
+        let string = std::fs::read_to_string(path).map_err(MetadataError::Read)?;
+        string.parse().map_err(MetadataError::Parse)
+    }
 }
 
 impl FromStr for Metadata {
