@@ -2,6 +2,10 @@
 name = "google-fonts-sources"
 version = "0.1.0"
 edition = "2021"
+description = "finding source repositories of Google Fonts fonts"
+license = "MIT/Apache-2.0"
+repository = "https://github.com/googlefonts/google-fonts-sources"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.5.7", features = ["derive"] }
