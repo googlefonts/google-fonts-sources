@@ -107,9 +107,10 @@ pub fn discover_sources(
             has_config_files.get(&meta.name).map(|configs| RepoInfo {
                 repo_name: meta
                     .repo_url
-                    .as_ref()
-                    .map(|url| url.rsplit_once('/').unwrap().1.to_owned())
-                    .expect("errored before now if url was malformed"),
+                    .as_deref()
+                    .and_then(repo_name_from_url)
+                    .expect("already checked")
+                    .to_owned(),
                 repo_url: meta.repo_url.clone().unwrap(),
                 config_files: configs.clone(),
             })
@@ -285,9 +286,8 @@ fn config_files_for_repo(
     repo_url: &str,
     checkout_font_dir: &Path,
 ) -> Result<Vec<PathBuf>, ConfigFetchIssue> {
-    let Some((_, repo_name)) = repo_url.rsplit_once('/') else {
-        return Err(ConfigFetchIssue::BadRepoUrl(repo_url.into()));
-    };
+    let repo_name = repo_name_from_url(repo_url)
+        .ok_or_else(|| ConfigFetchIssue::BadRepoUrl(repo_url.into()))?;
 
     let local_repo_dir = checkout_font_dir.join(repo_name);
     // - if local repo already exists, then look there
@@ -436,6 +436,11 @@ fn clone_repo(url: &str, to_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn repo_name_from_url(url: &str) -> Option<&str> {
+    let url = url.trim_end_matches('/');
+    url.rsplit_once('/').map(|(_, tail)| tail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +452,17 @@ mod tests {
             config_file_from_remote_naive("https://github.com/googlefonts/bangers"),
             Err(ConfigFetchIssue::NoConfigFound)
         ));
+    }
+
+    #[test]
+    fn name_from_url() {
+        assert_eq!(
+            repo_name_from_url("https://github.com/hyper-type/hahmlet/"),
+            Some("hahmlet"),
+        );
+        assert_eq!(
+            repo_name_from_url("https://github.com/hyper-type/Advent"),
+            Some("Advent"),
+        );
     }
 }
