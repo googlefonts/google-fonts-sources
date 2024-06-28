@@ -25,13 +25,12 @@ static GF_REPO_URL: &str = "https://github.com/google/fonts";
 static METADATA_FILE: &str = "METADATA.pb";
 
 /// Information about a font repository
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct RepoInfo {
-    /// The name of the font.
+    /// The name of the repository.
     ///
-    /// Multiple fonts may live in the same repository; this is the name of
-    /// one of the fonts.
-    pub font_name: String,
+    /// This is everything after the trailing '/' in e.g. "https://github.com/PaoloBiagini/Joan"
+    pub repo_name: String,
     /// The repository's url
     pub repo_url: String,
     /// The names of config files that exist in this repository's source directory
@@ -40,12 +39,17 @@ pub struct RepoInfo {
 
 /// entry point for the cli tool
 pub fn run(args: &Args) {
-    let repos = discover_sources(args);
+    let repos = discover_sources(
+        args.repo_path.as_deref(),
+        args.fonts_dir.as_deref(),
+        args.verbose,
+    );
     let output = if args.list {
         let urls = repos.into_iter().map(|r| r.repo_url).collect::<Vec<_>>();
         urls.join("\n")
     } else {
-        jsonify(repos)
+        serde_json::to_string_pretty(&repos)
+            .unwrap_or_die(|e| eprintln!("failed to serialize repo info: '{e}'"))
     };
 
     if let Some(out) = args.out.as_ref() {
@@ -60,11 +64,14 @@ pub fn run(args: &Args) {
 /// This looks at every font in the google/fonts github repo, looks to see if
 /// we have a known upstream repository for that font, and then looks to see if
 /// that repo contains a config.yaml file.
-pub fn discover_sources(args: &Args) -> Vec<RepoInfo> {
-    // before starting work make sure we have a github token:
-    let candidates = match args.repo_path.as_deref() {
-        Some(path) => get_candidates_from_local_checkout(path, args.verbose),
-        None => get_candidates_from_remote(args.verbose),
+pub fn discover_sources(
+    fonts_repo_path: Option<&Path>,
+    sources_dir: Option<&Path>,
+    verbose: bool,
+) -> Vec<RepoInfo> {
+    let candidates = match fonts_repo_path {
+        Some(path) => get_candidates_from_local_checkout(path, verbose),
+        None => get_candidates_from_remote(verbose),
     };
 
     let have_repo = pruned_candidates(&candidates);
@@ -73,14 +80,14 @@ pub fn discover_sources(args: &Args) -> Vec<RepoInfo> {
         "checking {} repositories for config.yaml files",
         have_repo.len()
     );
-    let has_config_files = if let Some(font_path) = args.fonts_dir.as_ref() {
+    let has_config_files = if let Some(font_path) = sources_dir {
         find_config_files(&have_repo, &font_path)
     } else {
         let tempdir = tempfile::tempdir().unwrap();
         find_config_files(&have_repo, tempdir.path())
     };
 
-    if args.verbose {
+    if verbose {
         eprintln!(
             "{} of {} candidates have known repo url",
             have_repo.len(),
@@ -98,7 +105,11 @@ pub fn discover_sources(args: &Args) -> Vec<RepoInfo> {
         .iter()
         .filter_map(|meta| {
             has_config_files.get(&meta.name).map(|configs| RepoInfo {
-                font_name: meta.name.clone(),
+                repo_name: meta
+                    .repo_url
+                    .as_ref()
+                    .map(|url| url.rsplit_once('/').unwrap().1.to_owned())
+                    .expect("errored before now if url was malformed"),
                 repo_url: meta.repo_url.clone().unwrap(),
                 config_files: configs.clone(),
             })
@@ -107,20 +118,6 @@ pub fn discover_sources(args: &Args) -> Vec<RepoInfo> {
 
     repos.sort();
     repos
-}
-
-// no need to bring in serde + derive for this
-fn jsonify(repos: Vec<RepoInfo>) -> String {
-    let mut json = Vec::with_capacity(repos.len());
-    for repo in repos {
-        json.push(serde_json::json! ({
-            "name": repo.font_name,
-            "url": repo.repo_url,
-            "config_files": repo.config_files
-        }));
-    }
-
-    serde_json::to_string_pretty(&json).unwrap()
 }
 
 /// Returns the set of candidates that have a unique repository URL
