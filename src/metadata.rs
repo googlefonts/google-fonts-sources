@@ -57,6 +57,7 @@ impl FromStr for Metadata {
 ///
 /// This is expected to be temporary (until the official protobufs crate is done? and isn't
 /// fully spec compliant, e.g. doesn't handle escape sequences)
+#[allow(clippy::skip_while_next)] // we use skip_while so we can track if last byte was `\`
 fn extract_litstr(s: &str) -> Option<&str> {
     let s = s.trim();
     if s.bytes().next() != Some(b'"') {

@@ -29,7 +29,7 @@ static METADATA_FILE: &str = "METADATA.pb";
 pub struct RepoInfo {
     /// The name of the repository.
     ///
-    /// This is everything after the trailing '/' in e.g. "https://github.com/PaoloBiagini/Joan"
+    /// This is everything after the trailing '/' in e.g. `https://github.com/PaoloBiagini/Joan`
     pub repo_name: String,
     /// The repository's url
     pub repo_url: String,
@@ -81,7 +81,7 @@ pub fn discover_sources(
         have_repo.len()
     );
     let has_config_files = if let Some(font_path) = sources_dir {
-        find_config_files(&have_repo, &font_path)
+        find_config_files(&have_repo, font_path)
     } else {
         let tempdir = tempfile::tempdir().unwrap();
         find_config_files(&have_repo, tempdir.path())
@@ -278,7 +278,7 @@ enum ConfigFetchIssue {
     BadRepoUrl(String),
     // contains stderr
     GitFail(String),
-    Http(ureq::Error),
+    Http(Box<ureq::Error>),
 }
 
 /// Checks for a config file in a given repo.
@@ -294,7 +294,9 @@ fn config_files_for_repo(
     // - otherwise try naive http requests first,
     // - and then finally clone the repo and look
     let local_git_dir = local_repo_dir.join(".git");
-    if local_git_dir.exists() {}
+    if local_git_dir.exists() {
+        return get_config_paths(&local_repo_dir).ok_or(ConfigFetchIssue::NoConfigFound);
+    }
 
     let naive = config_file_from_remote_naive(repo_url).map(|p| vec![p]);
     // if not found, try checking out and looking; otherwise return the result
@@ -326,7 +328,7 @@ fn config_file_from_remote_naive(repo_url: &str) -> Result<PathBuf, ConfigFetchI
                 return Err(ConfigFetchIssue::RateLimit(backoff));
             }
             Err(e) => {
-                return Err(ConfigFetchIssue::Http(e));
+                return Err(ConfigFetchIssue::Http(Box::new(e)));
             }
         }
     }
