@@ -24,6 +24,8 @@ use metadata::Metadata;
 static GF_REPO_URL: &str = "https://github.com/google/fonts";
 static METADATA_FILE: &str = "METADATA.pb";
 
+type GitRev = String;
+
 /// Information about a font repository
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct RepoInfo {
@@ -33,6 +35,8 @@ pub struct RepoInfo {
     pub repo_name: String,
     /// The repository's url
     pub repo_url: String,
+    /// The commit rev of the repository's main branch
+    pub rev: String,
     /// The names of config files that exist in this repository's source directory
     pub config_files: Vec<PathBuf>,
 }
@@ -103,7 +107,7 @@ pub fn discover_sources(
 
     let mut repos: Vec<_> = have_repo
         .iter()
-        .filter_map(|meta| {
+        .filter_map(|(meta, rev)| {
             has_config_files.get(&meta.name).map(|configs| RepoInfo {
                 repo_name: meta
                     .repo_url
@@ -112,6 +116,7 @@ pub fn discover_sources(
                     .expect("already checked")
                     .to_owned(),
                 repo_url: meta.repo_url.clone().unwrap(),
+                rev: rev.clone(),
                 config_files: configs.clone(),
             })
         })
@@ -122,11 +127,11 @@ pub fn discover_sources(
 }
 
 /// Returns the set of candidates that have a unique repository URL
-fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
+fn pruned_candidates(candidates: &BTreeSet<(Metadata, GitRev)>) -> BTreeSet<(Metadata, GitRev)> {
     let mut seen_repos = HashSet::new();
     let mut result = BTreeSet::new();
     for metadata in candidates {
-        let Some(url) = metadata.repo_url.as_ref() else {
+        let Some(url) = metadata.0.repo_url.as_ref() else {
             continue;
         };
 
@@ -150,10 +155,10 @@ fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
 /// and if we don't find anything then we clone the repo locally and inspect
 /// its contents.
 fn find_config_files(
-    fonts: &BTreeSet<Metadata>,
+    fonts: &BTreeSet<(Metadata, GitRev)>,
     checkout_font_dir: &Path,
 ) -> BTreeMap<String, Vec<PathBuf>> {
-    let n_has_repo = fonts.iter().filter(|md| md.repo_url.is_some()).count();
+    let n_has_repo = fonts.iter().filter(|(md, _)| md.repo_url.is_some()).count();
 
     // messages sent from a worker thread
     enum Message {
@@ -172,7 +177,7 @@ fn find_config_files(
         let (tx, rx) = channel();
         for (name, repo) in fonts
             .iter()
-            .filter_map(|meta| meta.repo_url.as_ref().map(|repo| (&meta.name, repo)))
+            .filter_map(|(meta, _)| meta.repo_url.as_ref().map(|repo| (&meta.name, repo)))
         {
             let repo = repo.clone();
             let name = name.clone();
@@ -379,7 +384,7 @@ fn get_config_paths(font_dir: &Path) -> Option<Vec<PathBuf>> {
     Some(config_files)
 }
 
-fn get_candidates_from_remote(verbose: bool) -> BTreeSet<Metadata> {
+fn get_candidates_from_remote(verbose: bool) -> BTreeSet<(Metadata, GitRev)> {
     let tempdir = tempfile::tempdir().unwrap();
     if verbose {
         eprintln!("cloning {GF_REPO_URL} to {}", tempdir.path().display());
@@ -389,7 +394,7 @@ fn get_candidates_from_remote(verbose: bool) -> BTreeSet<Metadata> {
     get_candidates_from_local_checkout(tempdir.path(), verbose)
 }
 
-fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Metadata> {
+fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<(Metadata, GitRev)> {
     let ofl_dir = path.join("ofl");
     let mut result = BTreeSet::new();
     for font_dir in iter_ofl_subdirectories(&ofl_dir) {
@@ -402,9 +407,23 @@ fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Me
                 continue;
             }
         };
-        result.insert(metadata);
+        let rev = get_git_rev(path);
+        result.insert((metadata, rev));
     }
     result
+}
+
+fn get_git_rev(repo_path: &Path) -> String {
+    let output = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .current_dir(repo_path)
+        .output()
+        .expect("git rev-parse HEAD should not fail if repo exists");
+    std::str::from_utf8(&output.stdout)
+        .expect("rev is always ascii/hex string")
+        .trim()
+        .to_owned()
 }
 
 fn load_metadata(path: &Path) -> Result<Metadata, MetadataError> {
