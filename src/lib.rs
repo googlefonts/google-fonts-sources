@@ -107,18 +107,20 @@ pub fn discover_sources(
 
     let mut repos: Vec<_> = have_repo
         .iter()
-        .filter_map(|(meta, rev)| {
-            has_config_files.get(&meta.name).map(|configs| RepoInfo {
-                repo_name: meta
-                    .repo_url
-                    .as_deref()
-                    .and_then(repo_name_from_url)
-                    .expect("already checked")
-                    .to_owned(),
-                repo_url: meta.repo_url.clone().unwrap(),
-                rev: rev.clone(),
-                config_files: configs.clone(),
-            })
+        .filter_map(|meta| {
+            has_config_files
+                .get(&meta.name)
+                .map(|(configs, rev)| RepoInfo {
+                    repo_name: meta
+                        .repo_url
+                        .as_deref()
+                        .and_then(repo_name_from_url)
+                        .expect("already checked")
+                        .to_owned(),
+                    repo_url: meta.repo_url.clone().unwrap(),
+                    rev: rev.clone(),
+                    config_files: configs.clone(),
+                })
         })
         .collect();
 
@@ -127,11 +129,11 @@ pub fn discover_sources(
 }
 
 /// Returns the set of candidates that have a unique repository URL
-fn pruned_candidates(candidates: &BTreeSet<(Metadata, GitRev)>) -> BTreeSet<(Metadata, GitRev)> {
+fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
     let mut seen_repos = HashSet::new();
     let mut result = BTreeSet::new();
     for metadata in candidates {
-        let Some(url) = metadata.0.repo_url.as_ref() else {
+        let Some(url) = metadata.repo_url.as_ref() else {
             continue;
         };
 
@@ -155,14 +157,18 @@ fn pruned_candidates(candidates: &BTreeSet<(Metadata, GitRev)>) -> BTreeSet<(Met
 /// and if we don't find anything then we clone the repo locally and inspect
 /// its contents.
 fn find_config_files(
-    fonts: &BTreeSet<(Metadata, GitRev)>,
+    fonts: &BTreeSet<Metadata>,
     checkout_font_dir: &Path,
-) -> BTreeMap<String, Vec<PathBuf>> {
-    let n_has_repo = fonts.iter().filter(|(md, _)| md.repo_url.is_some()).count();
+) -> BTreeMap<String, (Vec<PathBuf>, GitRev)> {
+    let n_has_repo = fonts.iter().filter(|md| md.repo_url.is_some()).count();
 
     // messages sent from a worker thread
     enum Message {
-        Finished { font: String, configs: Vec<PathBuf> },
+        Finished {
+            font: String,
+            configs: Vec<PathBuf>,
+            rev: GitRev,
+        },
         ErrorMsg(String),
         RateLimit(usize),
     }
@@ -177,7 +183,7 @@ fn find_config_files(
         let (tx, rx) = channel();
         for (name, repo) in fonts
             .iter()
-            .filter_map(|(meta, _)| meta.repo_url.as_ref().map(|repo| (&meta.name, repo)))
+            .filter_map(|meta| meta.repo_url.as_ref().map(|repo| (&meta.name, repo)))
         {
             let repo = repo.clone();
             let name = name.clone();
@@ -190,11 +196,12 @@ fn find_config_files(
                         std::thread::sleep(Duration::from_secs(1));
                     }
                     // then try to get configs (which may trigger rate limiting)
-                    match config_files_for_repo(&repo, checkout_font_dir) {
-                        Ok(configs) => {
+                    match config_files_and_rev_for_repo(&repo, checkout_font_dir) {
+                        Ok((configs, rev)) => {
                             tx.send(Message::Finished {
                                 font: name,
                                 configs,
+                                rev,
                             })
                             .unwrap();
                             break;
@@ -203,6 +210,7 @@ fn find_config_files(
                             tx.send(Message::Finished {
                                 font: name,
                                 configs: Default::default(),
+                                rev: Default::default(),
                             })
                             .unwrap();
                             break;
@@ -233,9 +241,9 @@ fn find_config_files(
 
         while seen < sent {
             match rx.recv() {
-                Ok(Message::Finished { font, configs }) => {
+                Ok(Message::Finished { font, configs, rev }) => {
                     if !configs.is_empty() {
-                        result.insert(font, configs);
+                        result.insert(font, (configs, rev));
                     }
                     seen += 1;
                 }
@@ -286,11 +294,11 @@ enum ConfigFetchIssue {
     Http(Box<ureq::Error>),
 }
 
-/// Checks for a config file in a given repo.
-fn config_files_for_repo(
+/// Checks for a config file in a given repo; also returns git rev
+fn config_files_and_rev_for_repo(
     repo_url: &str,
     checkout_font_dir: &Path,
-) -> Result<Vec<PathBuf>, ConfigFetchIssue> {
+) -> Result<(Vec<PathBuf>, GitRev), ConfigFetchIssue> {
     let repo_name = repo_name_from_url(repo_url)
         .ok_or_else(|| ConfigFetchIssue::BadRepoUrl(repo_url.into()))?;
 
@@ -300,16 +308,27 @@ fn config_files_for_repo(
     // - and then finally clone the repo and look
     let local_git_dir = local_repo_dir.join(".git");
     if local_git_dir.exists() {
-        return get_config_paths(&local_repo_dir).ok_or(ConfigFetchIssue::NoConfigFound);
+        let rev = get_git_rev(&local_repo_dir);
+        let configs = get_config_paths(&local_repo_dir).ok_or(ConfigFetchIssue::NoConfigFound)?;
+        return Ok((configs, rev));
     }
 
-    let naive = config_file_from_remote_naive(repo_url).map(|p| vec![p]);
+    let naive = config_file_and_rev_from_remote_naive(repo_url).map(|(p, rev)| (vec![p], rev));
     // if not found, try checking out and looking; otherwise return the result
     if !matches!(naive, Err(ConfigFetchIssue::NoConfigFound)) {
         naive
     } else {
-        config_files_from_local_checkout(repo_url, &local_repo_dir)
+        let configs = config_files_from_local_checkout(repo_url, &local_repo_dir)?;
+        let rev = get_git_rev(&local_repo_dir);
+        Ok((configs, rev))
     }
+}
+
+fn config_file_and_rev_from_remote_naive(
+    repo_url: &str,
+) -> Result<(PathBuf, GitRev), ConfigFetchIssue> {
+    config_file_from_remote_naive(repo_url)
+        .and_then(|config| get_git_rev_remote(repo_url).map(|rev| (config, rev)))
 }
 
 // just check for the presence of the most common file names
@@ -384,7 +403,7 @@ fn get_config_paths(font_dir: &Path) -> Option<Vec<PathBuf>> {
     Some(config_files)
 }
 
-fn get_candidates_from_remote(verbose: bool) -> BTreeSet<(Metadata, GitRev)> {
+fn get_candidates_from_remote(verbose: bool) -> BTreeSet<Metadata> {
     let tempdir = tempfile::tempdir().unwrap();
     if verbose {
         eprintln!("cloning {GF_REPO_URL} to {}", tempdir.path().display());
@@ -394,7 +413,7 @@ fn get_candidates_from_remote(verbose: bool) -> BTreeSet<(Metadata, GitRev)> {
     get_candidates_from_local_checkout(tempdir.path(), verbose)
 }
 
-fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<(Metadata, GitRev)> {
+fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Metadata> {
     let ofl_dir = path.join("ofl");
     let mut result = BTreeSet::new();
     for font_dir in iter_ofl_subdirectories(&ofl_dir) {
@@ -407,8 +426,7 @@ fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<(M
                 continue;
             }
         };
-        let rev = get_git_rev(path);
-        result.insert((metadata, rev));
+        result.insert(metadata);
     }
     result
 }
@@ -424,6 +442,22 @@ fn get_git_rev(repo_path: &Path) -> String {
         .expect("rev is always ascii/hex string")
         .trim()
         .to_owned()
+}
+
+fn get_git_rev_remote(repo_url: &str) -> Result<GitRev, ConfigFetchIssue> {
+    let output = std::process::Command::new("git")
+        .arg("ls-remote")
+        .arg(repo_url)
+        .arg("HEAD")
+        .output()
+        .expect("should not fail if we found configs at this path");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sha = stdout
+        .split_whitespace()
+        .next()
+        .map(String::from)
+        .unwrap_or_else(|| stdout.into_owned());
+    Ok(sha)
 }
 
 fn load_metadata(path: &Path) -> Result<Metadata, MetadataError> {
@@ -468,9 +502,11 @@ mod tests {
 
     #[test]
     fn naive_config() {
-        assert!(config_file_from_remote_naive("https://github.com/PaoloBiagini/Joan").is_ok());
+        assert!(
+            config_file_and_rev_from_remote_naive("https://github.com/PaoloBiagini/Joan").is_ok()
+        );
         assert!(matches!(
-            config_file_from_remote_naive("https://github.com/googlefonts/bangers"),
+            config_file_and_rev_from_remote_naive("https://github.com/googlefonts/bangers"),
             Err(ConfigFetchIssue::NoConfigFound)
         ));
     }
@@ -485,5 +521,13 @@ mod tests {
             repo_name_from_url("https://github.com/hyper-type/Advent"),
             Some("Advent"),
         );
+    }
+
+    #[test]
+    fn remote_sha() {
+        let rev = get_git_rev_remote("https://github.com/googlefonts/fontations").unwrap();
+        // this will change over time so we're just sanity checking
+        assert!(rev.len() > 16);
+        assert!(rev.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
