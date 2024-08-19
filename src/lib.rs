@@ -1,4 +1,27 @@
 //! Finding sources for Google Fonts fonts
+//!
+//! # basic usage:
+//!
+//! ```
+//! // get a list of repositories:
+//!
+//! let font_repo_cache = Path::new("~/where_i_want_to_checkout_fonts");
+//! let font_repos = google_fonts_sources::discover_sources(None, Some(font_repo_cache), false)
+//!
+//! // for each repo we find, do something with each source:
+//!
+//! for repo in &font_repos {
+//!     let sources = match repo.get_sources(font_repo_cache) {
+//!         Ok(sources) => sources,
+//!         Err(e) => {
+//!             eprintln!("skipping repo '{}': '{e}'", repo.repo_name);
+//!             continue;
+//!         }
+//!     };
+//!
+//!     println!("repo '{}' contains sources {sources:?}", repo.repo_name);
+//! }
+//! ```
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -14,34 +37,25 @@ use std::{
 use kdam::{tqdm, BarExt};
 
 mod args;
+mod config;
 mod error;
 mod metadata;
+mod repo_info;
 
 pub use args::Args;
-use error::{MetadataError, UnwrapOrDie};
+pub use config::Config;
+pub use error::{BadConfig, LoadRepoError};
+use error::{GitFail, MetadataError, UnwrapOrDie};
 use metadata::Metadata;
+pub use repo_info::RepoInfo;
 
 static GF_REPO_URL: &str = "https://github.com/google/fonts";
 static METADATA_FILE: &str = "METADATA.pb";
 
 type GitRev = String;
 
-/// Information about a font repository
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub struct RepoInfo {
-    /// The name of the repository.
-    ///
-    /// This is everything after the trailing '/' in e.g. `https://github.com/PaoloBiagini/Joan`
-    pub repo_name: String,
-    /// The repository's url
-    pub repo_url: String,
-    /// The commit rev of the repository's main branch
-    pub rev: String,
-    /// The names of config files that exist in this repository's source directory
-    pub config_files: Vec<PathBuf>,
-}
-
 /// entry point for the cli tool
+#[doc(hidden)] // only intended to be used from our binary
 pub fn run(args: &Args) {
     let repos = discover_sources(
         args.repo_path.as_deref(),
@@ -68,6 +82,16 @@ pub fn run(args: &Args) {
 /// This looks at every font in the google/fonts github repo, looks to see if
 /// we have a known upstream repository for that font, and then looks to see if
 /// that repo contains a config.yaml file.
+///
+/// The 'fonts_repo_path' is the path to a local checkout of the [google/fonts]
+/// repository. If this is `None`, we will clone that repository to a tempdir.
+///
+/// The 'sources_dir' is the path to a directory where repositories will be
+/// checked out, if necessary. Because we check out lots of repos (and it is
+/// likely that the caller will want to check these out again later) it makes
+/// sense to cache these in most cases.
+///
+/// [google/fonts]: https://github.com/google/fonts
 pub fn discover_sources(
     fonts_repo_path: Option<&Path>,
     sources_dir: Option<&Path>,
@@ -226,7 +250,8 @@ fn find_config_files(
                         }
                         Err(e) => {
                             let msg = match e {
-                                ConfigFetchIssue::BadRepoUrl(s) | ConfigFetchIssue::GitFail(s) => s,
+                                ConfigFetchIssue::BadRepoUrl(s) => s,
+                                ConfigFetchIssue::GitFail(e) => e.to_string(),
                                 ConfigFetchIssue::Http(e) => e.to_string(),
                                 _ => unreachable!(), // handled above
                             };
@@ -290,7 +315,7 @@ enum ConfigFetchIssue {
     RateLimit(usize),
     BadRepoUrl(String),
     // contains stderr
-    GitFail(String),
+    GitFail(GitFail),
     Http(Box<ureq::Error>),
 }
 
@@ -308,7 +333,7 @@ fn config_files_and_rev_for_repo(
     // - and then finally clone the repo and look
     let local_git_dir = local_repo_dir.join(".git");
     if local_git_dir.exists() {
-        let rev = get_git_rev(&local_repo_dir);
+        let rev = get_git_rev(&local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
         let configs = get_config_paths(&local_repo_dir).ok_or(ConfigFetchIssue::NoConfigFound)?;
         return Ok((configs, rev));
     }
@@ -319,7 +344,7 @@ fn config_files_and_rev_for_repo(
         naive
     } else {
         let configs = config_files_from_local_checkout(repo_url, &local_repo_dir)?;
-        let rev = get_git_rev(&local_repo_dir);
+        let rev = get_git_rev(&local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
         Ok((configs, rev))
     }
 }
@@ -415,6 +440,9 @@ fn get_candidates_from_remote(verbose: bool) -> BTreeSet<Metadata> {
 
 fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Metadata> {
     let ofl_dir = path.join("ofl");
+    if verbose {
+        eprintln!("searching for candidates in {}", ofl_dir.display());
+    }
     let mut result = BTreeSet::new();
     for font_dir in iter_ofl_subdirectories(&ofl_dir) {
         let metadata = match load_metadata(&font_dir) {
@@ -429,19 +457,6 @@ fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Me
         result.insert(metadata);
     }
     result
-}
-
-fn get_git_rev(repo_path: &Path) -> String {
-    let output = std::process::Command::new("git")
-        .arg("rev-parse")
-        .arg("HEAD")
-        .current_dir(repo_path)
-        .output()
-        .expect("git rev-parse HEAD should not fail if repo exists");
-    std::str::from_utf8(&output.stdout)
-        .expect("rev is always ascii/hex string")
-        .trim()
-        .to_owned()
 }
 
 fn get_git_rev_remote(repo_url: &str) -> Result<GitRev, ConfigFetchIssue> {
@@ -460,6 +475,58 @@ fn get_git_rev_remote(repo_url: &str) -> Result<GitRev, ConfigFetchIssue> {
     Ok(sha)
 }
 
+/// Get the short sha of the current commit in the provided repository.
+///
+/// If no repo provided, run in current directory
+///
+/// returns `None` if the `git` command fails (for instance if the path is not
+/// a git repository)
+fn get_git_rev(repo_path: &Path) -> Result<String, GitFail> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "--short", "HEAD"])
+        .current_dir(repo_path);
+    let output = cmd.output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(GitFail::GitError(stderr.into_owned()));
+    }
+
+    Ok(std::str::from_utf8(&output.stdout)
+        .expect("rev is always ascii/hex string")
+        .trim()
+        .to_owned())
+}
+
+// try to checkout this rev.
+//
+// returns `true` if successful, `false` otherwise (indicating a git error)
+fn checkout_rev(repo_dir: &Path, rev: &str) -> Result<bool, GitFail> {
+    let sha = get_git_rev(repo_dir)?;
+    // the longer str is on the left, so we check if shorter str is a prefix
+    let (left, right) = if sha.len() > rev.len() {
+        (sha.as_str(), rev)
+    } else {
+        (rev, sha.as_str())
+    };
+    if left.starts_with(right) {
+        return Ok(true);
+    }
+    // checkouts might be shallow, so unshallow before looking for a rev:
+    let _ = std::process::Command::new("git")
+        .current_dir(repo_dir)
+        .args(["fetch", "--unshallow"])
+        .status();
+
+    std::process::Command::new("git")
+        .current_dir(repo_dir)
+        .arg("checkout")
+        .arg(rev)
+        .status()
+        .map(|stat| stat.success())
+        .map_err(Into::into)
+}
+
 fn load_metadata(path: &Path) -> Result<Metadata, MetadataError> {
     let meta_path = path.join(METADATA_FILE);
     Metadata::load(&meta_path)
@@ -471,8 +538,7 @@ fn iter_ofl_subdirectories(path: &Path) -> impl Iterator<Item = PathBuf> {
     contents.filter_map(|entry| entry.ok().map(|d| d.path()).filter(|p| p.is_dir()))
 }
 
-// on fail returns contents of stderr
-fn clone_repo(url: &str, to_dir: &Path) -> Result<(), String> {
+fn clone_repo(url: &str, to_dir: &Path) -> Result<(), GitFail> {
     assert!(to_dir.exists());
     let output = std::process::Command::new("git")
         // if a repo requires credentials fail instead of waiting
@@ -481,12 +547,11 @@ fn clone_repo(url: &str, to_dir: &Path) -> Result<(), String> {
         .args(["--depth", "1"])
         .arg(url)
         .arg(to_dir)
-        .output()
-        .expect("failed to execute git command");
+        .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(stderr.into_owned());
+        return Err(GitFail::GitError(stderr.into_owned()));
     }
     Ok(())
 }

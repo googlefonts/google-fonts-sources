@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug, Default, clap::Parser)]
 #[command(version, about)]
+#[doc(hidden)] // only intended to be used from our binary
 pub struct Args {
     /// Path to local checkout of google/fonts repository
     #[arg(short, long)]
