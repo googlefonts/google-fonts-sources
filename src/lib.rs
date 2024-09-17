@@ -104,7 +104,7 @@ pub fn discover_sources(
 
     let have_repo = pruned_candidates(&candidates);
 
-    eprintln!(
+    log::info!(
         "checking {} repositories for config.yaml files",
         have_repo.len()
     );
@@ -116,13 +116,13 @@ pub fn discover_sources(
     };
 
     if verbose {
-        eprintln!(
+        log::debug!(
             "{} of {} candidates have known repo url",
             have_repo.len(),
             candidates.len()
         );
 
-        eprintln!(
+        log::debug!(
             "{} of {} have sources/config.yaml",
             has_config_files.len(),
             have_repo.len()
@@ -295,7 +295,7 @@ fn find_config_files(
                     seen += 1;
                 }
                 Err(e) => {
-                    eprintln!("channel error: '{e}'");
+                    log::error!("channel error: '{e}'");
                     break;
                 }
             }
@@ -366,7 +366,7 @@ fn config_file_from_remote_naive(repo_url: &str) -> Result<PathBuf, ConfigFetchI
             Ok(resp) if resp.status() == 200 => return Ok(filename.into()),
             Ok(resp) => {
                 // seems very unlikely but it feels bad to just skip this branch?
-                eprintln!("unexpected response code for {repo_url}: {}", resp.status());
+                log::warn!("unexpected response code for {repo_url}: {}", resp.status());
             }
             Err(ureq::Error::Status(404, _)) => (),
             Err(ureq::Error::Status(429, resp)) => {
@@ -431,7 +431,7 @@ fn get_config_paths(font_dir: &Path) -> Option<Vec<PathBuf>> {
 fn get_candidates_from_remote(verbose: bool) -> BTreeSet<Metadata> {
     let tempdir = tempfile::tempdir().unwrap();
     if verbose {
-        eprintln!("cloning {GF_REPO_URL} to {}", tempdir.path().display());
+        log::info!("cloning {GF_REPO_URL} to {}", tempdir.path().display());
     }
     clone_repo(GF_REPO_URL, tempdir.path())
         .unwrap_or_die(|e| eprintln!("failed to checkout {GF_REPO_URL}: '{e}'"));
@@ -441,7 +441,7 @@ fn get_candidates_from_remote(verbose: bool) -> BTreeSet<Metadata> {
 fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Metadata> {
     let ofl_dir = path.join("ofl");
     if verbose {
-        eprintln!("searching for candidates in {}", ofl_dir.display());
+        log::debug!("searching for candidates in {}", ofl_dir.display());
     }
     let mut result = BTreeSet::new();
     for font_dir in iter_ofl_subdirectories(&ofl_dir) {
@@ -449,7 +449,7 @@ fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Me
             Ok(metadata) => metadata,
             Err(e) => {
                 if verbose {
-                    eprintln!("no metadata for font {}: '{}'", font_dir.display(), e);
+                    log::warn!("no metadata for font {}: '{}'", font_dir.display(), e);
                 }
                 continue;
             }
@@ -512,6 +512,10 @@ fn checkout_rev(repo_dir: &Path, rev: &str) -> Result<bool, GitFail> {
     if left.starts_with(right) {
         return Ok(true);
     }
+    log::info!(
+        "repo {} needs fetch for {rev} (at {sha})",
+        repo_dir.display()
+    );
     // checkouts might be shallow, so unshallow before looking for a rev:
     let _ = std::process::Command::new("git")
         .current_dir(repo_dir)
