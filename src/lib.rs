@@ -520,15 +520,20 @@ fn checkout_rev(repo_dir: &Path, rev: &str) -> Result<bool, GitFail> {
     let _ = std::process::Command::new("git")
         .current_dir(repo_dir)
         .args(["fetch", "--unshallow"])
-        .status();
+        .output();
 
-    std::process::Command::new("git")
+    let result = std::process::Command::new("git")
         .current_dir(repo_dir)
         .arg("checkout")
         .arg(rev)
-        .status()
-        .map(|stat| stat.success())
-        .map_err(Into::into)
+        .output()?;
+
+    if result.status.success() {
+        Ok(true)
+    } else {
+        log::warn!("failed to find rev {rev} for {}", repo_dir.display());
+        Ok(false)
+    }
 }
 
 fn load_metadata(path: &Path) -> Result<Metadata, MetadataError> {
