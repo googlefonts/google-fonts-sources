@@ -11,7 +11,7 @@ pub struct RepoInfo {
     /// The repository's url
     pub repo_url: String,
     /// The commit rev of the repository's main branch, at discovery time.
-    //NOTE: this isn't private because we want to force the use of `new` for
+    //NOTE: this is private because we want to force the use of `new` for
     //construction, so we can ensure urls are well formed
     rev: String,
     /// The names of config files that exist in this repository's source directory
@@ -55,13 +55,20 @@ impl RepoInfo {
         &self.rev
     }
 
+    /// Given a root cache directory, return the local path this repo.
+    ///
+    /// This is in the format, `{cache_dir}/{repo_org}/{repo_name}`
+    pub fn repo_path(&self, cache_dir: &Path) -> PathBuf {
+        // unwrap is okay because we already know the url is well formed
+        repo_path_for_url(&self.repo_url, cache_dir).unwrap()
+    }
+
     /// Return the a `Vec` of source files in this respository.
     ///
     /// If necessary, this will create a new checkout of this repo at
-    /// '{git_cache_dir}/{repo_name}'.
+    /// '{git_cache_dir}/{repo_org}/{repo_name}'.
     pub fn get_sources(&self, git_cache_dir: &Path) -> Result<Vec<PathBuf>, LoadRepoError> {
-        let font_dir = git_cache_dir.join(self.repo_name());
-
+        let font_dir = self.repo_path(git_cache_dir);
         if !font_dir.exists() {
             std::fs::create_dir_all(&font_dir)?;
             super::clone_repo(&self.repo_url, &font_dir)?;
@@ -106,4 +113,28 @@ fn repo_name_and_org_from_url(url: &str) -> Option<(&str, &str)> {
     let (rest, name) = url.rsplit_once('/')?;
     let (_, org) = rest.rsplit_once('/')?;
     Some((org, name))
+}
+
+pub(super) fn repo_path_for_url(url: &str, base_cache_dir: &Path) -> Option<PathBuf> {
+    let (org, name) = repo_name_and_org_from_url(url)?;
+    let mut path = base_cache_dir.join(org);
+    path.push(name);
+    Some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn org_and_name_from_url() {
+        assert_eq!(
+            repo_name_and_org_from_url("https://github.com/hyper-type/hahmlet/"),
+            Some(("hyper-type", "hahmlet")),
+        );
+        assert_eq!(
+            repo_name_and_org_from_url("https://github.com/hyper-type/Advent"),
+            Some(("hyper-type", "Advent")),
+        );
+    }
 }
