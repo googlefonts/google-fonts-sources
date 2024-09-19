@@ -58,9 +58,9 @@ impl RepoInfo {
     /// Return the a `Vec` of source files in this respository.
     ///
     /// If necessary, this will create a new checkout of this repo at
-    /// '{font_dir}/{repo_name}'.
-    pub fn get_sources(&self, font_repos_dir: &Path) -> Result<Vec<PathBuf>, LoadRepoError> {
-        let font_dir = font_repos_dir.join(self.repo_name());
+    /// '{git_cache_dir}/{repo_name}'.
+    pub fn get_sources(&self, git_cache_dir: &Path) -> Result<Vec<PathBuf>, LoadRepoError> {
+        let font_dir = git_cache_dir.join(self.repo_name());
 
         if !font_dir.exists() {
             std::fs::create_dir_all(&font_dir)?;
@@ -89,7 +89,10 @@ impl RepoInfo {
         let mut sources = configs
             .iter()
             .flat_map(|c| c.sources.iter())
-            .map(|source| source_dir.join(source))
+            .filter_map(|source| {
+                let source = source_dir.join(source);
+                source.exists().then_some(source)
+            })
             .collect::<Vec<_>>();
         sources.sort_unstable();
         sources.dedup();
