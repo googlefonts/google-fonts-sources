@@ -287,10 +287,8 @@ fn config_files_and_rev_for_repo(
     repo_url: &str,
     checkout_font_dir: &Path,
 ) -> Result<(Vec<PathBuf>, GitRev), ConfigFetchIssue> {
-    let repo_name = repo_name_from_url(repo_url)
-        .ok_or_else(|| ConfigFetchIssue::BadRepoUrl(repo_url.into()))?;
-
-    let local_repo_dir = checkout_font_dir.join(repo_name);
+    let local_repo_dir = repo_info::repo_path_for_url(repo_url, checkout_font_dir)
+        .ok_or_else(|| ConfigFetchIssue::BadRepoUrl(repo_url.to_owned()))?;
     // - if local repo already exists, then look there
     // - otherwise try naive http requests first,
     // - and then finally clone the repo and look
@@ -528,11 +526,6 @@ fn clone_repo(url: &str, to_dir: &Path) -> Result<(), GitFail> {
     Ok(())
 }
 
-fn repo_name_from_url(url: &str) -> Option<&str> {
-    let url = url.trim_end_matches('/');
-    url.rsplit_once('/').map(|(_, tail)| tail)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,18 +539,6 @@ mod tests {
             config_file_and_rev_from_remote_naive("https://github.com/googlefonts/bangers"),
             Err(ConfigFetchIssue::NoConfigFound)
         ));
-    }
-
-    #[test]
-    fn name_from_url() {
-        assert_eq!(
-            repo_name_from_url("https://github.com/hyper-type/hahmlet/"),
-            Some("hahmlet"),
-        );
-        assert_eq!(
-            repo_name_from_url("https://github.com/hyper-type/Advent"),
-            Some("Advent"),
-        );
     }
 
     #[test]
