@@ -24,7 +24,7 @@
 //! ```
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeSet, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -79,6 +79,9 @@ pub fn run(args: &Args) {
 
 /// Discover repositories containing font source files.
 ///
+/// Returns a vec of `RepoInfo` structs describing repositories containing
+/// known font sources.
+///
 /// This looks at every font in the google/fonts github repo, looks to see if
 /// we have a known upstream repository for that font, and then looks to see if
 /// that repo contains a config.yaml file.
@@ -86,7 +89,7 @@ pub fn run(args: &Args) {
 /// The 'fonts_repo_path' is the path to a local checkout of the [google/fonts]
 /// repository. If this is `None`, we will clone that repository to a tempdir.
 ///
-/// The 'sources_dir' is the path to a directory where repositories will be
+/// The 'git_cache_dir' is the path to a directory where repositories will be
 /// checked out, if necessary. Because we check out lots of repos (and it is
 /// likely that the caller will want to check these out again later) it makes
 /// sense to cache these in most cases.
@@ -94,7 +97,7 @@ pub fn run(args: &Args) {
 /// [google/fonts]: https://github.com/google/fonts
 pub fn discover_sources(
     fonts_repo_path: Option<&Path>,
-    sources_dir: Option<&Path>,
+    git_cache_dir: Option<&Path>,
     verbose: bool,
 ) -> Vec<RepoInfo> {
     let candidates = match fonts_repo_path {
@@ -102,14 +105,14 @@ pub fn discover_sources(
         None => get_candidates_from_remote(verbose),
     };
 
-    let have_repo = pruned_candidates(&candidates);
+    let have_repo = candidates_with_known_repo(&candidates);
 
     log::info!(
         "checking {} repositories for config.yaml files",
         have_repo.len()
     );
-    let has_config_files = if let Some(font_path) = sources_dir {
-        find_config_files(&have_repo, font_path)
+    let repos_with_config_files = if let Some(git_cache) = git_cache_dir {
+        find_config_files(&have_repo, git_cache)
     } else {
         let tempdir = tempfile::tempdir().unwrap();
         find_config_files(&have_repo, tempdir.path())
@@ -124,36 +127,16 @@ pub fn discover_sources(
 
         log::debug!(
             "{} of {} have sources/config.yaml",
-            has_config_files.len(),
+            repos_with_config_files.len(),
             have_repo.len()
         );
     }
 
-    let mut repos: Vec<_> = have_repo
-        .iter()
-        .filter_map(|meta| {
-            has_config_files
-                .get(&meta.name)
-                .map(|(configs, rev)| RepoInfo {
-                    repo_name: meta
-                        .repo_url
-                        .as_deref()
-                        .and_then(repo_name_from_url)
-                        .expect("already checked")
-                        .to_owned(),
-                    repo_url: meta.repo_url.clone().unwrap(),
-                    rev: rev.clone(),
-                    config_files: configs.clone(),
-                })
-        })
-        .collect();
-
-    repos.sort();
-    repos
+    repos_with_config_files
 }
 
 /// Returns the set of candidates that have a unique repository URL
-fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
+fn candidates_with_known_repo(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
     let mut seen_repos = HashSet::new();
     let mut result = BTreeSet::new();
     for metadata in candidates {
@@ -180,37 +163,25 @@ fn pruned_candidates(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metadata> {
 /// We naively look for the most common file names using a simple http request,
 /// and if we don't find anything then we clone the repo locally and inspect
 /// its contents.
-fn find_config_files(
-    fonts: &BTreeSet<Metadata>,
-    checkout_font_dir: &Path,
-) -> BTreeMap<String, (Vec<PathBuf>, GitRev)> {
+fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<RepoInfo> {
     let n_has_repo = fonts.iter().filter(|md| md.repo_url.is_some()).count();
 
     // messages sent from a worker thread
     enum Message {
-        Finished {
-            font: String,
-            configs: Vec<PathBuf>,
-            rev: GitRev,
-        },
+        Finished(Option<RepoInfo>),
         ErrorMsg(String),
         RateLimit(usize),
     }
 
     rayon::scope(|s| {
-        let mut result = BTreeMap::new();
+        let mut result = Vec::new();
         let mut seen = 0;
         let mut sent = 0;
         let mut progressbar = kdam::tqdm!(total = n_has_repo);
         let rate_limited = Arc::new(AtomicBool::new(false));
 
         let (tx, rx) = channel();
-        for (name, repo) in fonts
-            .iter()
-            .filter_map(|meta| meta.repo_url.as_ref().map(|repo| (&meta.name, repo)))
-        {
-            let repo = repo.clone();
-            let name = name.clone();
+        for repo_url in fonts.iter().filter_map(|meta| meta.repo_url.clone()) {
             let tx = tx.clone();
             let rate_limited = rate_limited.clone();
             s.spawn(move |_| {
@@ -220,23 +191,15 @@ fn find_config_files(
                         std::thread::sleep(Duration::from_secs(1));
                     }
                     // then try to get configs (which may trigger rate limiting)
-                    match config_files_and_rev_for_repo(&repo, checkout_font_dir) {
-                        Ok((configs, rev)) => {
-                            tx.send(Message::Finished {
-                                font: name,
-                                configs,
-                                rev,
-                            })
-                            .unwrap();
+                    match config_files_and_rev_for_repo(&repo_url, git_cache_dir) {
+                        Ok((config_files, rev)) if !config_files.is_empty() => {
+                            let info = RepoInfo::new(repo_url, rev, config_files);
+                            tx.send(Message::Finished(info)).unwrap();
                             break;
                         }
-                        Err(ConfigFetchIssue::NoConfigFound) => {
-                            tx.send(Message::Finished {
-                                font: name,
-                                configs: Default::default(),
-                                rev: Default::default(),
-                            })
-                            .unwrap();
+                        // no configs found or looking for configs failed:
+                        Err(ConfigFetchIssue::NoConfigFound) | Ok(_) => {
+                            tx.send(Message::Finished(None)).unwrap();
                             break;
                         }
                         // if we're rate limited, set the flag telling other threads
@@ -266,9 +229,9 @@ fn find_config_files(
 
         while seen < sent {
             match rx.recv() {
-                Ok(Message::Finished { font, configs, rev }) => {
-                    if !configs.is_empty() {
-                        result.insert(font, (configs, rev));
+                Ok(Message::Finished(info)) => {
+                    if let Some(info) = info {
+                        result.push(info);
                     }
                     seen += 1;
                 }
