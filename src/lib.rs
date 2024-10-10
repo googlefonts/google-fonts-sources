@@ -7,7 +7,7 @@
 //! // get a list of repositories:
 //!
 //! let font_repo_cache = Path::new("~/where_i_want_to_checkout_fonts");
-//! let font_repos = google_fonts_sources::discover_sources(None, Some(font_repo_cache), false);
+//! let font_repos = google_fonts_sources::discover_sources(font_repo_cache).unwrap();
 //!
 //! // for each repo we find, do something with each source:
 //!
@@ -274,32 +274,30 @@ fn config_files_and_rev_for_repo(
     // - otherwise try naive http requests first,
     // - and then finally clone the repo and look
     let local_git_dir = local_repo_dir.join(".git");
-    if local_git_dir.exists() {
-        let rev = get_git_rev(&local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
-        let configs = get_config_paths(&local_repo_dir).ok_or(ConfigFetchIssue::NoConfigFound)?;
-        return Ok((configs, rev));
-    }
+    let skip_http = local_git_dir.exists();
 
-    let naive = config_file_and_rev_from_remote_naive(repo_url).map(|(p, rev)| (vec![p], rev));
-    // if not found, try checking out and looking; otherwise return the result
-    if !matches!(naive, Err(ConfigFetchIssue::NoConfigFound)) {
-        naive
-    } else {
-        let configs = config_files_from_local_checkout(repo_url, &local_repo_dir)?;
-        let rev = get_git_rev(&local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
-        Ok((configs, rev))
+    if !skip_http {
+        let config_from_http =
+            config_file_and_rev_from_remote_http(repo_url).map(|(p, rev)| (vec![p], rev));
+        // if not found, try checking out and looking; otherwise return the result
+        if !matches!(config_from_http, Err(ConfigFetchIssue::NoConfigFound)) {
+            return config_from_http;
+        }
     }
+    let configs = config_files_from_local_checkout(repo_url, &local_repo_dir)?;
+    let rev = get_git_rev(&local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
+    Ok((configs, rev))
 }
 
-fn config_file_and_rev_from_remote_naive(
+fn config_file_and_rev_from_remote_http(
     repo_url: &str,
 ) -> Result<(PathBuf, GitRev), ConfigFetchIssue> {
-    config_file_from_remote_naive(repo_url)
+    config_file_from_remote_http(repo_url)
         .and_then(|config| get_git_rev_remote(repo_url).map(|rev| (config, rev)))
 }
 
 // just check for the presence of the most common file names
-fn config_file_from_remote_naive(repo_url: &str) -> Result<PathBuf, ConfigFetchIssue> {
+fn config_file_from_remote_http(repo_url: &str) -> Result<PathBuf, ConfigFetchIssue> {
     for filename in ["config.yaml", "config.yml"] {
         let config_url = format!("{repo_url}/tree/HEAD/sources/{filename}");
         let req = ureq::head(&config_url);
@@ -336,7 +334,12 @@ fn config_files_from_local_checkout(
         std::fs::create_dir_all(local_repo_dir).unwrap();
         clone_repo(repo_url, local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
     }
-    get_config_paths(local_repo_dir).ok_or(ConfigFetchIssue::NoConfigFound)
+    let configs: Vec<_> = iter_config_paths(local_repo_dir)?.collect();
+    if configs.is_empty() {
+        Err(ConfigFetchIssue::NoConfigFound)
+    } else {
+        Ok(configs)
+    }
 }
 
 /// Look for a file like 'config.yaml' in a google fonts font checkout.
@@ -344,7 +347,7 @@ fn config_files_from_local_checkout(
 /// This will look for all files that begin with 'config' and have either the
 /// 'yaml' or 'yml' extension; if multiple files match this pattern it will
 /// return the one with the shortest name.
-fn get_config_paths(font_dir: &Path) -> Option<Vec<PathBuf>> {
+fn iter_config_paths(font_dir: &Path) -> Result<impl Iterator<Item = PathBuf>, ConfigFetchIssue> {
     #[allow(clippy::ptr_arg)] // we don't use &Path so we can pass this to a closure below
     fn looks_like_config_file(path: &PathBuf) -> bool {
         let (Some(stem), Some(extension)) =
@@ -355,19 +358,31 @@ fn get_config_paths(font_dir: &Path) -> Option<Vec<PathBuf>> {
         stem.starts_with("config") && (extension == "yaml" || extension == "yml")
     }
 
-    let sources_dir = font_dir.join("sources");
-    let contents = std::fs::read_dir(sources_dir).ok()?;
-    let mut config_files = contents
-        .filter_map(|entry| {
-            entry
-                .ok()
-                .and_then(|e| e.path().file_name().map(PathBuf::from))
-        })
-        .filter(looks_like_config_file)
-        .collect::<Vec<_>>();
+    let sources_dir = find_sources_dir(font_dir).ok_or(ConfigFetchIssue::NoConfigFound)?;
+    let contents = std::fs::read_dir(sources_dir).map_err(|_| ConfigFetchIssue::NoConfigFound)?;
+    Ok(contents
+        .filter_map(|entry| entry.ok().map(|e| PathBuf::from(e.file_name())))
+        .filter(looks_like_config_file))
+}
 
-    config_files.sort_by_key(|p| p.to_str().map(|s| s.len()).unwrap_or(usize::MAX));
-    Some(config_files)
+fn find_sources_dir(font_dir: &Path) -> Option<PathBuf> {
+    for case in ["sources", "Sources"] {
+        let path = font_dir.join(case);
+        if path.exists() {
+            // in order to handle case-insensitive file systems, we need to
+            // canonicalize this name, strip the canonical prefix, and glue
+            // it all back together
+            let canonical_font_dir = font_dir.canonicalize().ok()?;
+            let canonical_path = path.canonicalize().ok()?;
+            if let Ok(stripped) = canonical_path.strip_prefix(&canonical_font_dir) {
+                return Some(font_dir.join(stripped));
+            }
+            // if that fails for some reason just return the unnormalized path,
+            // we'll survive
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn update_google_fonts_checkout(path: &Path) -> Result<(), Error> {
@@ -533,12 +548,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn naive_config() {
+    fn http_config() {
         assert!(
-            config_file_and_rev_from_remote_naive("https://github.com/PaoloBiagini/Joan").is_ok()
+            config_file_and_rev_from_remote_http("https://github.com/PaoloBiagini/Joan").is_ok()
         );
         assert!(matches!(
-            config_file_and_rev_from_remote_naive("https://github.com/googlefonts/bangers"),
+            config_file_and_rev_from_remote_http("https://github.com/googlefonts/bangers"),
             Err(ConfigFetchIssue::NoConfigFound)
         ));
     }
@@ -549,5 +564,13 @@ mod tests {
         // this will change over time so we're just sanity checking
         assert!(rev.len() > 16);
         assert!(rev.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn source_dir_case() {
+        assert_eq!(
+            find_sources_dir(Path::new("./source_dir_test")),
+            Some(PathBuf::from("./source_dir_test/Sources"))
+        )
     }
 }
