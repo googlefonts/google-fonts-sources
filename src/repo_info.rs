@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use crate::{error::LoadRepoError, Config};
 
 /// Information about a git repository containing font sources
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[non_exhaustive]
 pub struct RepoInfo {
     /// The repository's url
@@ -63,12 +65,17 @@ impl RepoInfo {
         repo_path_for_url(&self.repo_url, cache_dir).unwrap()
     }
 
-    /// Return the a `Vec` of source files in this respository.
+    /// Attempt to checkout/update this repo to the provided `cache_dir`.
     ///
-    /// If necessary, this will create a new checkout of this repo at
-    /// '{git_cache_dir}/{repo_org}/{repo_name}'.
-    pub fn get_sources(&self, git_cache_dir: &Path) -> Result<Vec<PathBuf>, LoadRepoError> {
-        let font_dir = self.repo_path(git_cache_dir);
+    /// The repo will be checked out to '{cache_dir}/{repo_org}/{repo_name}',
+    /// and HEAD will be set to the `self.git_rev()`.
+    ///
+    /// Returns the path to the checkout on success.
+    ///
+    /// Returns an error if the repo cannot be cloned, the git rev cannot be
+    /// found, or if there is an io error.
+    pub fn instantiate(&self, cache_dir: &Path) -> Result<PathBuf, LoadRepoError> {
+        let font_dir = self.repo_path(cache_dir);
         if !font_dir.exists() {
             std::fs::create_dir_all(&font_dir)?;
             super::clone_repo(&self.repo_url, &font_dir)?;
@@ -79,7 +86,33 @@ impl RepoInfo {
                 sha: self.rev.clone(),
             });
         }
+        Ok(font_dir)
+    }
 
+    /// Iterate paths to config files in this repo, checking it out if necessary
+    pub fn iter_configs(
+        &self,
+        cache_dir: &Path,
+    ) -> Result<impl Iterator<Item = PathBuf> + '_, LoadRepoError> {
+        let font_dir = self.instantiate(cache_dir)?;
+        let (left, right) = match super::iter_config_paths(&font_dir) {
+            Ok(iter) => (Some(iter), None),
+            Err(_) => (None, None),
+        };
+        let sources_dir = super::find_sources_dir(&font_dir).unwrap_or(font_dir);
+        Ok(left
+            .into_iter()
+            .flatten()
+            .chain(right)
+            .map(move |config| sources_dir.join(config)))
+    }
+
+    /// Return a `Vec` of source files in this respository.
+    ///
+    /// If necessary, this will create a new checkout of this repo at
+    /// '{git_cache_dir}/{repo_org}/{repo_name}'.
+    pub fn get_sources(&self, git_cache_dir: &Path) -> Result<Vec<PathBuf>, LoadRepoError> {
+        let font_dir = self.instantiate(git_cache_dir)?;
         let source_dir = font_dir.join("sources");
         let configs = self
             .config_files
