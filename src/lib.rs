@@ -2,11 +2,12 @@
 //!
 //! # basic usage:
 //!
-//! ```
+//! ```no_run
+//! # use std::path::Path;
 //! // get a list of repositories:
 //!
 //! let font_repo_cache = Path::new("~/where_i_want_to_checkout_fonts");
-//! let font_repos = google_fonts_sources::discover_sources(None, Some(font_repo_cache), false)
+//! let font_repos = google_fonts_sources::discover_sources(None, Some(font_repo_cache), false);
 //!
 //! // for each repo we find, do something with each source:
 //!
@@ -14,12 +15,12 @@
 //!     let sources = match repo.get_sources(font_repo_cache) {
 //!         Ok(sources) => sources,
 //!         Err(e) => {
-//!             eprintln!("skipping repo '{}': '{e}'", repo.repo_name);
+//!             eprintln!("skipping repo '{}': '{e}'", repo.repo_name());
 //!             continue;
 //!         }
 //!     };
 //!
-//!     println!("repo '{}' contains sources {sources:?}", repo.repo_name);
+//!     println!("repo '{}' contains sources {sources:?}", repo.repo_name());
 //! }
 //! ```
 
