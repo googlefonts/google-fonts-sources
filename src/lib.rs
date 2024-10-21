@@ -46,7 +46,7 @@ mod repo_info;
 pub use args::Args;
 pub use config::Config;
 pub use error::{BadConfig, LoadRepoError};
-use error::{GitFail, MetadataError, UnwrapOrDie};
+use error::{Error, GitFail, MetadataError, UnwrapOrDie};
 use metadata::Metadata;
 pub use repo_info::RepoInfo;
 
@@ -58,11 +58,7 @@ type GitRev = String;
 /// entry point for the cli tool
 #[doc(hidden)] // only intended to be used from our binary
 pub fn run(args: &Args) {
-    let repos = discover_sources(
-        args.repo_path.as_deref(),
-        args.fonts_dir.as_deref(),
-        args.verbose,
-    );
+    let repos = discover_sources(&args.fonts_dir).unwrap_or_die(|e| eprintln!("{e}"));
     let output = if args.list {
         let urls = repos.into_iter().map(|r| r.repo_url).collect::<Vec<_>>();
         urls.join("\n")
@@ -83,12 +79,9 @@ pub fn run(args: &Args) {
 /// Returns a vec of `RepoInfo` structs describing repositories containing
 /// known font sources.
 ///
-/// This looks at every font in the google/fonts github repo, looks to see if
+/// This looks at every font in the [google/fonts] github repo, looks to see if
 /// we have a known upstream repository for that font, and then looks to see if
 /// that repo contains a config.yaml file.
-///
-/// The 'fonts_repo_path' is the path to a local checkout of the [google/fonts]
-/// repository. If this is `None`, we will clone that repository to a tempdir.
 ///
 /// The 'git_cache_dir' is the path to a directory where repositories will be
 /// checked out, if necessary. Because we check out lots of repos (and it is
@@ -96,44 +89,31 @@ pub fn run(args: &Args) {
 /// sense to cache these in most cases.
 ///
 /// [google/fonts]: https://github.com/google/fonts
-pub fn discover_sources(
-    fonts_repo_path: Option<&Path>,
-    git_cache_dir: Option<&Path>,
-    verbose: bool,
-) -> Vec<RepoInfo> {
-    let candidates = match fonts_repo_path {
-        Some(path) => get_candidates_from_local_checkout(path, verbose),
-        None => get_candidates_from_remote(verbose),
-    };
-
+pub fn discover_sources(git_cache_dir: &Path) -> Result<Vec<RepoInfo>, Error> {
+    let google_slash_fonts = git_cache_dir.join("google/fonts");
+    update_google_fonts_checkout(&google_slash_fonts)?;
+    let candidates = get_candidates_from_local_checkout(&google_slash_fonts);
     let have_repo = candidates_with_known_repo(&candidates);
 
     log::info!(
         "checking {} repositories for config.yaml files",
         have_repo.len()
     );
-    let repos_with_config_files = if let Some(git_cache) = git_cache_dir {
-        find_config_files(&have_repo, git_cache)
-    } else {
-        let tempdir = tempfile::tempdir().unwrap();
-        find_config_files(&have_repo, tempdir.path())
-    };
+    let repos_with_config_files = find_config_files(&have_repo, git_cache_dir);
 
-    if verbose {
-        log::debug!(
-            "{} of {} candidates have known repo url",
-            have_repo.len(),
-            candidates.len()
-        );
+    log::info!(
+        "{} of {} candidates have known repo url",
+        have_repo.len(),
+        candidates.len()
+    );
 
-        log::debug!(
-            "{} of {} have sources/config.yaml",
-            repos_with_config_files.len(),
-            have_repo.len()
-        );
-    }
+    log::info!(
+        "{} of {} have sources/config.yaml",
+        repos_with_config_files.len(),
+        have_repo.len()
+    );
 
-    repos_with_config_files
+    Ok(repos_with_config_files)
 }
 
 /// Returns the set of candidates that have a unique repository URL
@@ -390,29 +370,26 @@ fn get_config_paths(font_dir: &Path) -> Option<Vec<PathBuf>> {
     Some(config_files)
 }
 
-fn get_candidates_from_remote(verbose: bool) -> BTreeSet<Metadata> {
-    let tempdir = tempfile::tempdir().unwrap();
-    if verbose {
-        log::info!("cloning {GF_REPO_URL} to {}", tempdir.path().display());
+fn update_google_fonts_checkout(path: &Path) -> Result<(), Error> {
+    if !path.exists() {
+        log::info!("cloning {GF_REPO_URL} to {}", path.display());
+        std::fs::create_dir_all(path)?;
+        clone_repo(GF_REPO_URL, path)?;
+    } else {
+        fetch_latest(path)?;
     }
-    clone_repo(GF_REPO_URL, tempdir.path())
-        .unwrap_or_die(|e| eprintln!("failed to checkout {GF_REPO_URL}: '{e}'"));
-    get_candidates_from_local_checkout(tempdir.path(), verbose)
+    Ok(())
 }
 
-fn get_candidates_from_local_checkout(path: &Path, verbose: bool) -> BTreeSet<Metadata> {
+fn get_candidates_from_local_checkout(path: &Path) -> BTreeSet<Metadata> {
     let ofl_dir = path.join("ofl");
-    if verbose {
-        log::debug!("searching for candidates in {}", ofl_dir.display());
-    }
+    log::debug!("searching for candidates in {}", ofl_dir.display());
     let mut result = BTreeSet::new();
     for font_dir in iter_ofl_subdirectories(&ofl_dir) {
         let metadata = match load_metadata(&font_dir) {
             Ok(metadata) => metadata,
             Err(e) => {
-                if verbose {
-                    log::warn!("no metadata for font {}: '{}'", font_dir.display(), e);
-                }
+                log::debug!("no metadata for font {}: '{}'", font_dir.display(), e);
                 continue;
             }
         };
@@ -451,7 +428,10 @@ fn get_git_rev(repo_path: &Path) -> Result<String, GitFail> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(GitFail::GitError(stderr.into_owned()));
+        return Err(GitFail::GitError {
+            path: repo_path.to_owned(),
+            stderr: stderr.into_owned(),
+        });
     }
 
     Ok(std::str::from_utf8(&output.stdout)
@@ -522,7 +502,28 @@ fn clone_repo(url: &str, to_dir: &Path) -> Result<(), GitFail> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(GitFail::GitError(stderr.into_owned()));
+        return Err(GitFail::GitError {
+            path: to_dir.to_owned(),
+            stderr: stderr.into_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// On success returns whether there were any changes
+fn fetch_latest(path: &Path) -> Result<(), GitFail> {
+    let output = std::process::Command::new("git")
+        // if a repo requires credentials fail instead of waiting
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("pull")
+        .current_dir(path)
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(GitFail::GitError {
+            path: path.to_owned(),
+            stderr: stderr.into_owned(),
+        });
     }
     Ok(())
 }

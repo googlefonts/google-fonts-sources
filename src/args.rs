@@ -6,12 +6,11 @@ use std::path::PathBuf;
 #[command(version, about)]
 #[doc(hidden)] // only intended to be used from our binary
 pub struct Args {
-    /// Path to local checkout of google/fonts repository
-    #[arg(short, long)]
-    pub repo_path: Option<PathBuf>,
-    #[arg(short, long)]
-    /// Path to a directory where we should checkout fonts; will reuse existing checkouts
-    pub fonts_dir: Option<PathBuf>,
+    /// Path to a directory where we will store font sources.
+    ///
+    /// This should be a directory dedicated to this task; the tool will
+    /// assume that anything in it can be modified or deleted as needed.
+    pub fonts_dir: PathBuf,
     /// Path to write output. If omitted, output is printed to stdout
     #[arg(short, long)]
     pub out: Option<PathBuf>,

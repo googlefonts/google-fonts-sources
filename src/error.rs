@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, path::PathBuf};
 
 use crate::metadata::BadMetadata;
 
@@ -20,6 +20,17 @@ impl<T, E: Display> UnwrapOrDie<T, E> for Result<T, E> {
             }
         }
     }
+}
+
+/// Errors that occur while trying to find sources
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// An io error occurred
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// an error with reading the google/fonts repo
+    #[error(transparent)]
+    Git(#[from] GitFail),
 }
 
 /// Errors that occur while trying to load a config file
@@ -74,8 +85,8 @@ pub enum GitFail {
         std::io::Error,
     ),
     /// The git command returns a non-zero status
-    #[error("command failed: '{0}'")]
-    GitError(String),
+    #[error("command failed: in '{path}': '{stderr}'")]
+    GitError { path: PathBuf, stderr: String },
 }
 
 pub(crate) enum MetadataError {
