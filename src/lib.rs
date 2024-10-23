@@ -45,8 +45,8 @@ mod repo_info;
 
 pub use args::Args;
 pub use config::Config;
-pub use error::{BadConfig, LoadRepoError};
-use error::{Error, GitFail, MetadataError, UnwrapOrDie};
+pub use error::{BadConfig, Error, GitFail, LoadRepoError};
+use error::{MetadataError, UnwrapOrDie};
 use metadata::Metadata;
 pub use repo_info::RepoInfo;
 
@@ -329,6 +329,8 @@ fn config_files_from_local_checkout(
     local_repo_dir: &Path,
 ) -> Result<Vec<PathBuf>, ConfigFetchIssue> {
     if local_repo_dir.exists() {
+        // try fetch; but failure is okay
+        let _ = fetch_latest(local_repo_dir);
         // should we always fetch? idk
     } else {
         std::fs::create_dir_all(local_repo_dir).unwrap();

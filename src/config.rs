@@ -19,10 +19,14 @@ use crate::error::BadConfig;
 pub struct Config {
     pub sources: Vec<String>,
     pub family_name: Option<String>,
-    #[serde(default)]
+    #[serde(default = "true_")]
     pub build_variable: bool,
     #[serde(default)]
     pub axis_order: Vec<Tag>,
+}
+
+fn true_() -> bool {
+    true
 }
 
 impl Config {

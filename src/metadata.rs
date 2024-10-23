@@ -45,6 +45,7 @@ impl FromStr for Metadata {
         let repo_url = s
             .find(REPO_KEY)
             .and_then(|pos| extract_litstr(&s[pos + REPO_KEY.len()..]))
+            .map(|s| s.trim_end_matches('/')) // trailing / is not meaningful for a url
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         Ok(Metadata { name, repo_url })
