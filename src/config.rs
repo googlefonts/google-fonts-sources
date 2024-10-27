@@ -21,8 +21,36 @@ pub struct Config {
     pub family_name: Option<String>,
     #[serde(default = "true_")]
     pub build_variable: bool,
+    #[serde(default = "true_")]
+    pub build_static: bool,
+    #[serde(default = "true_")]
+    pub build_ttf: bool,
+    #[serde(default)]
+    pub build_otf: bool,
     #[serde(default)]
     pub axis_order: Vec<Tag>,
+    pub recipe_provider: Option<String>,
+    #[serde(default)]
+    pub glyph_data: Vec<String>,
+
+    // build options
+    #[serde(default = "true_")]
+    pub flatten_components: bool,
+    #[serde(default = "true_")]
+    pub decompose_transformed_components: bool,
+    #[serde(default = "true_")]
+    pub reverse_outline_direction: bool,
+    #[serde(default = "true_")]
+    pub check_compatibility: bool,
+    #[serde(default = "true_")]
+    pub remove_outline_overlaps: bool,
+    #[serde(default)]
+    pub expand_features_to_instances: bool,
+
+    #[serde(default = "true_")]
+    pub build_small_cap: bool,
+    #[serde(default = "true_")]
+    pub split_italic: bool,
 }
 
 fn true_() -> bool {
