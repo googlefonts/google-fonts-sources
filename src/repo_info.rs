@@ -16,7 +16,7 @@ pub struct RepoInfo {
     //NOTE: this is private because we want to force the use of `new` for
     //construction, so we can ensure urls are well formed
     rev: String,
-    /// The names of config files that exist in this repository's source directory
+    /// Paths to config files in this repo, relative to the repo root.
     pub config_files: Vec<PathBuf>,
 }
 
@@ -90,21 +90,23 @@ impl RepoInfo {
     }
 
     /// Iterate paths to config files in this repo, checking it out if necessary
+    ///
+    /// This returns paths to the actual location on disk of the files.
     pub fn iter_configs(
         &self,
         cache_dir: &Path,
     ) -> Result<impl Iterator<Item = PathBuf> + '_, LoadRepoError> {
         let font_dir = self.instantiate(cache_dir)?;
-        let (left, right) = match super::iter_config_paths(&font_dir) {
-            Ok(iter) => (Some(iter), None),
-            Err(_) => (None, None),
-        };
-        let sources_dir = super::find_sources_dir(&font_dir).unwrap_or(font_dir);
-        Ok(left
-            .into_iter()
-            .flatten()
-            .chain(right)
-            .map(move |config| sources_dir.join(config)))
+        Ok(self.config_files.iter().map(move |config| {
+            // old style we only stored the config file name
+            if config.parent() == Some(Path::new("")) {
+                if let Some(source_dir) = super::find_sources_dir(&font_dir) {
+                    return source_dir.join(config);
+                }
+            }
+            // now we include the full path relative to the font_dir
+            font_dir.join(config)
+        }))
     }
 
     /// Return a `Vec` of source files in this respository.
