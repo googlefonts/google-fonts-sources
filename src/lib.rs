@@ -113,6 +113,14 @@ pub fn discover_sources(git_cache_dir: &Path) -> Result<Vec<RepoInfo>, Error> {
         have_repo.len()
     );
 
+    log::info!(
+        "found {} total config files",
+        repos_with_config_files
+            .iter()
+            .map(|repo| repo.config_files.len())
+            .sum::<usize>()
+    );
+
     Ok(repos_with_config_files)
 }
 
@@ -303,7 +311,7 @@ fn config_file_from_remote_http(repo_url: &str) -> Result<PathBuf, ConfigFetchIs
         let req = ureq::head(&config_url);
 
         match req.call() {
-            Ok(resp) if resp.status() == 200 => return Ok(filename.into()),
+            Ok(resp) if resp.status() == 200 => return Ok(Path::new("sources").join(filename)),
             Ok(resp) => {
                 // seems very unlikely but it feels bad to just skip this branch?
                 log::warn!("unexpected response code for {repo_url}: {}", resp.status());
@@ -336,7 +344,7 @@ fn config_files_from_local_checkout(
         std::fs::create_dir_all(local_repo_dir).unwrap();
         clone_repo(repo_url, local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
     }
-    let configs: Vec<_> = iter_config_paths(local_repo_dir)?.collect();
+    let configs: Vec<_> = find_config_paths(local_repo_dir)?;
     if configs.is_empty() {
         Err(ConfigFetchIssue::NoConfigFound)
     } else {
@@ -349,7 +357,7 @@ fn config_files_from_local_checkout(
 /// This will look for all files that begin with 'config' and have either the
 /// 'yaml' or 'yml' extension; if multiple files match this pattern it will
 /// return the one with the shortest name.
-fn iter_config_paths(font_dir: &Path) -> Result<impl Iterator<Item = PathBuf>, ConfigFetchIssue> {
+fn find_config_paths(font_dir: &Path) -> Result<Vec<PathBuf>, ConfigFetchIssue> {
     #[allow(clippy::ptr_arg)] // we don't use &Path so we can pass this to a closure below
     fn looks_like_config_file(path: &PathBuf) -> bool {
         let (Some(stem), Some(extension)) =
@@ -360,11 +368,65 @@ fn iter_config_paths(font_dir: &Path) -> Result<impl Iterator<Item = PathBuf>, C
         stem.starts_with("config") && (extension == "yaml" || extension == "yml")
     }
 
-    let sources_dir = find_sources_dir(font_dir).ok_or(ConfigFetchIssue::NoConfigFound)?;
-    let contents = std::fs::read_dir(sources_dir).map_err(|_| ConfigFetchIssue::NoConfigFound)?;
-    Ok(contents
-        .filter_map(|entry| entry.ok().map(|e| PathBuf::from(e.file_name())))
-        .filter(looks_like_config_file))
+    let sources_dirs = find_sources_directories(font_dir);
+    if sources_dirs.is_empty() {
+        return Err(ConfigFetchIssue::NoConfigFound);
+    }
+
+    let mut configs = Vec::new();
+
+    for sources_dir in sources_dirs {
+        let rel_sources_dir = sources_dir
+            .strip_prefix(font_dir)
+            .unwrap_or(sources_dir.as_path());
+        let contents =
+            std::fs::read_dir(&sources_dir).map_err(|_| ConfigFetchIssue::NoConfigFound)?;
+        configs.extend(
+            contents
+                .filter_map(|entry| entry.ok().map(|e| PathBuf::from(e.file_name())))
+                .filter(looks_like_config_file)
+                .map(|config| rel_sources_dir.join(config)),
+        );
+    }
+    Ok(configs)
+}
+
+/// Although it is uncommon, a single repo may contain multiple source directories.
+///
+/// Normally we would expect one 'sources' our 'Sources' directory in the font
+/// directory root; but the directory may optionally contain multiple families,
+/// each with its own source_dir, like:
+///
+/// - my_font_repo/
+///   - fontone/
+///     - sources/
+///   - fonttwo/
+///     - sources/
+///
+///
+/// (we aren't going to look deeper than one level though!)
+fn find_sources_directories(font_dir: &Path) -> Vec<PathBuf> {
+    // first just look in the font root; if we find it there we're good
+    if let Some(sources) = find_sources_dir(font_dir) {
+        return vec![sources];
+    }
+
+    // if we _dont_ find it we're now going to look in all the immediate child
+    // directories of the font root:
+
+    let mut out = Vec::new();
+    for child in std::fs::read_dir(font_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flat_map(|child| child.ok())
+    {
+        let path = child.path();
+        if path.is_dir() {
+            out.extend(find_sources_dir(&path));
+        }
+    }
+    out
 }
 
 fn find_sources_dir(font_dir: &Path) -> Option<PathBuf> {
@@ -571,8 +633,19 @@ mod tests {
     #[test]
     fn source_dir_case() {
         assert_eq!(
-            find_sources_dir(Path::new("./source_dir_test")),
-            Some(PathBuf::from("./source_dir_test/Sources"))
+            find_sources_dir(Path::new("./testdata/source_dir_test")),
+            Some(PathBuf::from("./testdata/source_dir_test/Sources"))
+        )
+    }
+
+    #[test]
+    fn multi_family_repo() {
+        assert_eq!(
+            find_config_paths(Path::new("./testdata/multi_family_repo")).unwrap(),
+            [
+                Path::new("family1/sources/config.yaml"),
+                Path::new("family2/Sources/config-this-too.yaml"),
+            ]
         )
     }
 }
