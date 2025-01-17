@@ -1,6 +1,9 @@
 //! font repository information
 
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+};
 
 use crate::{error::LoadRepoError, Config};
 
@@ -18,6 +21,13 @@ pub struct RepoInfo {
     rev: String,
     /// The names of config files that exist in this repository's source directory
     pub config_files: Vec<PathBuf>,
+    /// If `true`, this is a private googlefonts repo.
+    ///
+    /// We don't discover these repos, but they can be specified in json and
+    /// we will load them. In this case, a valid oauth token must be specified
+    /// via the `GITHUB_TOKEN` environment variable.
+    #[serde(default)]
+    auth: bool,
 }
 
 impl RepoInfo {
@@ -34,6 +44,7 @@ impl RepoInfo {
             repo_url,
             rev,
             config_files,
+            auth: false,
         })
     }
 
@@ -65,6 +76,28 @@ impl RepoInfo {
         repo_path_for_url(&self.repo_url, cache_dir).unwrap()
     }
 
+    /// Return the URL we'll use to fetch the repo, handling authentication.
+    fn repo_url_with_auth_token_if_needed(&self) -> Result<Cow<str>, LoadRepoError> {
+        if self.auth {
+            let auth_token =
+                std::env::var("GITHUB_TOKEN").map_err(|_| LoadRepoError::MissingAuth)?;
+            let url_body = self
+                .repo_url
+                .trim_start_matches("https://")
+                .trim_start_matches("www.");
+            let add_dot_git = if self.repo_url.ends_with(".git") {
+                ""
+            } else {
+                ".git"
+            };
+
+            let auth_url = format!("https://{auth_token}:x-oauth-basic@{url_body}{add_dot_git}");
+            Ok(auth_url.into())
+        } else {
+            Ok(self.repo_url.as_str().into())
+        }
+    }
+
     /// Attempt to checkout/update this repo to the provided `cache_dir`.
     ///
     /// The repo will be checked out to '{cache_dir}/{repo_org}/{repo_name}',
@@ -78,7 +111,8 @@ impl RepoInfo {
         let font_dir = self.repo_path(cache_dir);
         if !font_dir.exists() {
             std::fs::create_dir_all(&font_dir)?;
-            super::clone_repo(&self.repo_url, &font_dir)?;
+            let repo_url = self.repo_url_with_auth_token_if_needed()?;
+            super::clone_repo(&repo_url, &font_dir)?;
         }
 
         if !super::checkout_rev(&font_dir, &self.rev)? {
