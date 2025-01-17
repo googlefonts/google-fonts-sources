@@ -72,6 +72,8 @@ pub enum LoadRepoError {
         #[from]
         BadConfig,
     ),
+    #[error("reposity requires an auth token but GITHUB_TOKEN not set")]
+    MissingAuth,
 }
 
 /// Things that go wrong when trying to run a git command
