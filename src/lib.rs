@@ -150,7 +150,7 @@ fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<Re
     // messages sent from a worker thread
     enum Message {
         Finished(Option<RepoInfo>),
-        ErrorMsg(String),
+        ErrorMsg { repo_url: String, msg: String },
         RateLimit(usize),
     }
 
@@ -197,9 +197,13 @@ fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<Re
                                 ConfigFetchIssue::BadRepoUrl(s) => s,
                                 ConfigFetchIssue::GitFail(e) => e.to_string(),
                                 ConfigFetchIssue::Http(e) => e.to_string(),
+                                ConfigFetchIssue::NonEmptyTargetDir(path) => format!(
+                                    "target directory '{}' exists and is non-empty",
+                                    path.display()
+                                ),
                                 _ => unreachable!(), // handled above
                             };
-                            tx.send(Message::ErrorMsg(msg)).unwrap();
+                            tx.send(Message::ErrorMsg { repo_url, msg }).unwrap();
                             break;
                         }
                     }
@@ -234,8 +238,10 @@ fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<Re
                         limit_progress.update(1).unwrap();
                     }
                 }
-                Ok(Message::ErrorMsg(msg)) => {
-                    progressbar.write(msg).unwrap();
+                Ok(Message::ErrorMsg { repo_url, msg }) => {
+                    progressbar
+                        .write(format!("failed to get '{repo_url}': {msg}"))
+                        .unwrap();
                     seen += 1;
                 }
                 Err(e) => {
@@ -256,6 +262,7 @@ fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<Re
 #[derive(Debug)]
 enum ConfigFetchIssue {
     NoConfigFound,
+    NonEmptyTargetDir(PathBuf),
     RateLimit(usize),
     BadRepoUrl(String),
     // contains stderr
@@ -283,6 +290,13 @@ fn config_files_and_rev_for_repo(
         if !matches!(config_from_http, Err(ConfigFetchIssue::NoConfigFound)) {
             return config_from_http;
         }
+    }
+    // if the git dir does not exist but the containing dir does, something
+    // probably went wrong on an earlier run; let's wipe the containing dir
+    // and start over.
+    if local_repo_dir.exists() && !local_git_dir.exists() {
+        std::fs::remove_dir(&local_repo_dir)
+            .map_err(|_| ConfigFetchIssue::NonEmptyTargetDir(local_repo_dir.clone()))?;
     }
     let configs = config_files_from_local_checkout(repo_url, &local_repo_dir)?;
     let rev = get_git_rev(&local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
@@ -393,6 +407,7 @@ fn update_google_fonts_checkout(path: &Path) -> Result<(), Error> {
         std::fs::create_dir_all(path)?;
         clone_repo(GF_REPO_URL, path)?;
     } else {
+        log::info!("fetching latest from {GF_REPO_URL}");
         fetch_latest(path)?;
     }
     Ok(())
