@@ -251,6 +251,7 @@ fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<Re
             }
             progressbar.update(1).unwrap();
         }
+        result.sort_unstable();
         result
     })
 }
