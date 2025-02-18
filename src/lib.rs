@@ -454,8 +454,7 @@ fn get_git_rev_remote(repo_url: &str) -> Result<GitRev, ConfigFetchIssue> {
 /// a git repository)
 fn get_git_rev(repo_path: &Path) -> Result<String, GitFail> {
     let mut cmd = std::process::Command::new("git");
-    cmd.args(["rev-parse", "--short", "HEAD"])
-        .current_dir(repo_path);
+    cmd.args(["rev-parse", "HEAD"]).current_dir(repo_path);
     let output = cmd.output()?;
 
     if !output.status.success() {
