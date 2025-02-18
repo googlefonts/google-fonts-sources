@@ -26,8 +26,13 @@ pub struct RepoInfo {
     /// We don't discover these repos, but they can be specified in json and
     /// we will load them. In this case, a valid oauth token must be specified
     /// via the `GITHUB_TOKEN` environment variable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     auth: bool,
+}
+
+// a little helper used above
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl RepoInfo {
