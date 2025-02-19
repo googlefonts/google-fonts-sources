@@ -197,6 +197,7 @@ fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<Re
                                 ConfigFetchIssue::BadRepoUrl(s) => s,
                                 ConfigFetchIssue::GitFail(e) => e.to_string(),
                                 ConfigFetchIssue::Http(e) => e.to_string(),
+                                ConfigFetchIssue::HttpErrorResponse(e) => e.to_string(),
                                 ConfigFetchIssue::NonEmptyTargetDir(path) => format!(
                                     "target directory '{}' exists and is non-empty",
                                     path.display()
@@ -269,6 +270,7 @@ enum ConfigFetchIssue {
     // contains stderr
     GitFail(GitFail),
     Http(Box<ureq::Error>),
+    HttpErrorResponse(ureq::http::StatusCode),
 }
 
 /// Checks for a config file in a given repo; also returns git rev
@@ -315,21 +317,28 @@ fn config_file_and_rev_from_remote_http(
 fn config_file_from_remote_http(repo_url: &str) -> Result<PathBuf, ConfigFetchIssue> {
     for filename in ["config.yaml", "config.yml"] {
         let config_url = format!("{repo_url}/tree/HEAD/sources/{filename}");
-        let req = ureq::head(&config_url);
+        let req = ureq::head(&config_url)
+            .config()
+            .http_status_as_error(false)
+            .build();
 
         match req.call() {
             Ok(resp) if resp.status() == 200 => return Ok(filename.into()),
+            Ok(resp) if resp.status() == 404 => (),
+            Ok(resp) if resp.status() == 429 => {
+                let backoff = resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|s| s.to_str().ok().and_then(|s| s.parse::<usize>().ok()))
+                    .unwrap_or(60);
+                return Err(ConfigFetchIssue::RateLimit(backoff));
+            }
+            Ok(resp) if !resp.status().is_success() => {
+                return Err(ConfigFetchIssue::HttpErrorResponse(resp.status()));
+            }
             Ok(resp) => {
                 // seems very unlikely but it feels bad to just skip this branch?
                 log::warn!("unexpected response code for {repo_url}: {}", resp.status());
-            }
-            Err(ureq::Error::Status(404, _)) => (),
-            Err(ureq::Error::Status(429, resp)) => {
-                let backoff = resp
-                    .header("Retry-After")
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(60);
-                return Err(ConfigFetchIssue::RateLimit(backoff));
             }
             Err(e) => {
                 return Err(ConfigFetchIssue::Http(Box::new(e)));
