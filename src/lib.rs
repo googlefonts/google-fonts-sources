@@ -533,6 +533,12 @@ fn checkout_rev(repo_dir: &Path, rev: &str) -> Result<bool, GitFail> {
         .args(["fetch", "--unshallow"])
         .output();
 
+    // but if they're _not_ shallow, we need normal fetch :/
+    let _ = std::process::Command::new("git")
+        .current_dir(repo_dir)
+        .args(["fetch"])
+        .output();
+
     let result = std::process::Command::new("git")
         .current_dir(repo_dir)
         .arg("checkout")
