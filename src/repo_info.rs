@@ -139,7 +139,7 @@ impl RepoInfo {
         cache_dir: &Path,
     ) -> Result<impl Iterator<Item = PathBuf> + '_, LoadRepoError> {
         let font_dir = self.instantiate(cache_dir)?;
-        let (left, right) = match super::iter_config_paths(&font_dir) {
+        let (left, right) = match super::iter_config_paths(&font_dir, "Local checkout") {
             Ok(iter) => (Some(iter), None),
             Err(_) => (None, None),
         };
