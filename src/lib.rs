@@ -125,7 +125,11 @@ fn candidates_with_known_repo(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metad
     let mut seen_repos = HashSet::new();
     let mut result = BTreeSet::new();
     for metadata in candidates {
-        let Some(url) = metadata.repo_url.as_ref() else {
+        if let Some(url) = metadata.unknown_repo_url() {
+            log::warn!("unknown url '{url}' for host font {}", metadata.name);
+            continue;
+        }
+        let Some(url) = metadata.known_repo_url() else {
             continue;
         };
 
@@ -153,14 +157,18 @@ fn find_config_files(
     git_cache_dir: &Path,
     update_existing: bool,
 ) -> Vec<RepoInfo> {
-    let n_has_repo = fonts.iter().filter(|md| md.repo_url.is_some()).count();
-
     // messages sent from a worker thread
     enum Message {
         Finished(Option<RepoInfo>),
         ErrorMsg { repo_url: String, msg: String },
         RateLimit(usize),
     }
+
+    let repos_with_good_urls = fonts
+        .iter()
+        .filter_map(Metadata::known_repo_url)
+        .map(String::from)
+        .collect::<Vec<_>>();
 
     // this big block is all about managing a threadpool that will identify
     // repositores that have a structure we understand.
@@ -172,11 +180,11 @@ fn find_config_files(
         let mut result = Vec::new();
         let mut seen = 0;
         let mut sent = 0;
-        let mut progressbar = kdam::tqdm!(total = n_has_repo);
+        let mut progressbar = kdam::tqdm!(total = repos_with_good_urls.len());
         let rate_limited = Arc::new(AtomicBool::new(false));
 
         let (tx, rx) = channel();
-        for repo_url in fonts.iter().filter_map(|meta| meta.repo_url.clone()) {
+        for repo_url in repos_with_good_urls {
             let tx = tx.clone();
             let rate_limited = rate_limited.clone();
             s.spawn(move |_| {
