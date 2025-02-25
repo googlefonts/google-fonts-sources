@@ -25,6 +25,11 @@ pub struct Args {
     /// Just print a list of repository URLs
     #[arg(short, long)]
     pub list: bool,
+    /// Don't fetch/update repositories that already exist (but find new ones)
+    ///
+    /// Default is `false`, meaning we look for updates for all existing repos.
+    #[arg(short, long, default_value_t = false)]
+    pub no_fetch: bool,
     /// Print more info to stderr
     #[arg(short, long)]
     pub verbose: bool,
