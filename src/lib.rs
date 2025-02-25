@@ -579,7 +579,7 @@ mod tests {
             config_file_and_rev_from_remote_http("https://github.com/PaoloBiagini/Joan").is_ok()
         );
         assert!(matches!(
-            config_file_and_rev_from_remote_http("https://github.com/googlefonts/bangers"),
+            config_file_and_rev_from_remote_http("https://github.com/googlefonts/BethEllen"),
             Err(ConfigFetchIssue::NoConfigFound)
         ));
     }
