@@ -13,7 +13,7 @@ use crate::error::MetadataError;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Metadata {
     pub(crate) name: String,
-    pub(crate) repo_url: Option<String>,
+    repo_url: Option<String>,
 }
 
 /// Ways parsing metadata can fail
@@ -23,9 +23,30 @@ pub(crate) enum BadMetadata {
 }
 
 impl Metadata {
+    fn new(name: String, repo_url: Option<&str>) -> Self {
+        let repo_url = repo_url.and_then(post_process_repo_url);
+        Self { name, repo_url }
+    }
+
     pub fn load(path: &Path) -> Result<Self, MetadataError> {
         let string = std::fs::read_to_string(path).map_err(MetadataError::Read)?;
         string.parse().map_err(MetadataError::Parse)
+    }
+
+    /// If we have a repo url but we don't recognize it, (or it is invalid) return it
+    ///
+    /// (used for logging)
+    pub fn unknown_repo_url(&self) -> Option<&str> {
+        self.repo_url.as_deref().filter(|s| {
+            !s.starts_with("https://github.com") || ureq::http::Uri::from_str(s).is_err()
+        })
+    }
+
+    /// If we have a repo_url and it is a host we know (github) use it
+    pub fn known_repo_url(&self) -> Option<&str> {
+        self.repo_url
+            .as_deref()
+            .filter(|s| s.starts_with("https://github.com") && ureq::http::Uri::from_str(s).is_ok())
     }
 }
 
@@ -44,12 +65,25 @@ impl FromStr for Metadata {
             .to_owned();
         let repo_url = s
             .find(REPO_KEY)
-            .and_then(|pos| extract_litstr(&s[pos + REPO_KEY.len()..]))
-            .map(|s| s.trim_end_matches('/')) // trailing / is not meaningful for a url
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned);
-        Ok(Metadata { name, repo_url })
+            .and_then(|pos| extract_litstr(&s[pos + REPO_KEY.len()..]));
+        Ok(Metadata::new(name, repo_url))
     }
+}
+
+// normalize the url, filtering out various things that aren't valid
+fn post_process_repo_url(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/'); // trailing slash is not meaningful
+    if url.is_empty() {
+        return None;
+    }
+    let url = if let Some(suffix) = url.strip_prefix("https://www.github") {
+        format!("https://github{suffix}") // remove www if present
+    } else if url.starts_with("github") {
+        format!("https://{url}") // we've seen this once at least..
+    } else {
+        url.to_owned()
+    };
+    Some(url)
 }
 
 /// extract the contents of a string literal, e.g. the stuff between the quotation marks
@@ -109,5 +143,33 @@ mod tests {
         assert_eq!(extract_litstr(r#" "foo "#), None);
         // ignore escaped " (but we don't actually handle the escaping)
         assert_eq!(extract_litstr(r#" "foo\"bar" "#), Some("foo\\\"bar"));
+    }
+
+    #[test]
+    fn metadata_urls() {
+        // add https
+        assert_eq!(
+            Metadata::new("hi".into(), Some("github.com/hi/mom")).known_repo_url(),
+            Some("https://github.com/hi/mom")
+        );
+        // remove www
+        assert_eq!(
+            Metadata::new("hi".into(), Some("https://www.github.com/hi/mom")).known_repo_url(),
+            Some("https://github.com/hi/mom")
+        );
+        // ignore gitlab
+        assert_eq!(
+            Metadata::new("hi".into(), Some("https://www.gitlab.com/hi/mom")).known_repo_url(),
+            None
+        );
+        // ignore invalid urls
+        assert_eq!(
+            Metadata::new(
+                "hi".into(),
+                Some("https://www.github.com/hi/mom but with spaces! that's bad")
+            )
+            .known_repo_url(),
+            None
+        );
     }
 }

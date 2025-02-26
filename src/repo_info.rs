@@ -40,11 +40,16 @@ impl RepoInfo {
     ///
     /// Returns `None` if the url has some unexpected format, or if there are
     /// no config files
-    pub(crate) fn new(repo_url: String, rev: String, config_files: Vec<PathBuf>) -> Option<Self> {
+    pub(crate) fn new(
+        repo_url: String,
+        rev: String,
+        mut config_files: Vec<PathBuf>,
+    ) -> Option<Self> {
         if repo_name_and_org_from_url(&repo_url).is_none() {
             log::warn!("unexpected repo url '{repo_url}'");
             return None;
         }
+        config_files.sort_unstable();
         Some(Self {
             repo_url,
             rev,

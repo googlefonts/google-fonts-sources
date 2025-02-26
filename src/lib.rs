@@ -58,7 +58,8 @@ type GitRev = String;
 /// entry point for the cli tool
 #[doc(hidden)] // only intended to be used from our binary
 pub fn run(args: &Args) {
-    let repos = discover_sources(&args.fonts_dir).unwrap_or_die(|e| eprintln!("{e}"));
+    let repos =
+        discover_sources(&args.fonts_dir, !args.no_fetch).unwrap_or_die(|e| eprintln!("{e}"));
     let output = if args.list {
         let urls = repos.into_iter().map(|r| r.repo_url).collect::<Vec<_>>();
         urls.join("\n")
@@ -89,7 +90,10 @@ pub fn run(args: &Args) {
 /// sense to cache these in most cases.
 ///
 /// [google/fonts]: https://github.com/google/fonts
-pub fn discover_sources(git_cache_dir: &Path) -> Result<Vec<RepoInfo>, Error> {
+pub fn discover_sources(
+    git_cache_dir: &Path,
+    update_existing: bool,
+) -> Result<Vec<RepoInfo>, Error> {
     let google_slash_fonts = git_cache_dir.join("google/fonts");
     update_google_fonts_checkout(&google_slash_fonts)?;
     let candidates = get_candidates_from_local_checkout(&google_slash_fonts);
@@ -99,7 +103,7 @@ pub fn discover_sources(git_cache_dir: &Path) -> Result<Vec<RepoInfo>, Error> {
         "checking {} repositories for config.yaml files",
         have_repo.len()
     );
-    let repos_with_config_files = find_config_files(&have_repo, git_cache_dir);
+    let repos_with_config_files = find_config_files(&have_repo, git_cache_dir, update_existing);
 
     log::info!(
         "{} of {} candidates have known repo url",
@@ -121,7 +125,11 @@ fn candidates_with_known_repo(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metad
     let mut seen_repos = HashSet::new();
     let mut result = BTreeSet::new();
     for metadata in candidates {
-        let Some(url) = metadata.repo_url.as_ref() else {
+        if let Some(url) = metadata.unknown_repo_url() {
+            log::warn!("unknown url '{url}' for host font {}", metadata.name);
+            continue;
+        }
+        let Some(url) = metadata.known_repo_url() else {
             continue;
         };
 
@@ -144,9 +152,11 @@ fn candidates_with_known_repo(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metad
 /// We naively look for the most common file names using a simple http request,
 /// and if we don't find anything then we clone the repo locally and inspect
 /// its contents.
-fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<RepoInfo> {
-    let n_has_repo = fonts.iter().filter(|md| md.repo_url.is_some()).count();
-
+fn find_config_files(
+    fonts: &BTreeSet<Metadata>,
+    git_cache_dir: &Path,
+    update_existing: bool,
+) -> Vec<RepoInfo> {
     // messages sent from a worker thread
     enum Message {
         Finished(Option<RepoInfo>),
@@ -154,15 +164,27 @@ fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<Re
         RateLimit(usize),
     }
 
+    let repos_with_good_urls = fonts
+        .iter()
+        .filter_map(Metadata::known_repo_url)
+        .map(String::from)
+        .collect::<Vec<_>>();
+
+    // this big block is all about managing a threadpool that will identify
+    // repositores that have a structure we understand.
+    //
+    // For each repository url, we will first use simple http requests to check
+    // for the existence of config files at the few most common locations; if
+    // this fails we will then checkout the repo locally and look more closely.
     rayon::scope(|s| {
         let mut result = Vec::new();
         let mut seen = 0;
         let mut sent = 0;
-        let mut progressbar = kdam::tqdm!(total = n_has_repo);
+        let mut progressbar = kdam::tqdm!(total = repos_with_good_urls.len());
         let rate_limited = Arc::new(AtomicBool::new(false));
 
         let (tx, rx) = channel();
-        for repo_url in fonts.iter().filter_map(|meta| meta.repo_url.clone()) {
+        for repo_url in repos_with_good_urls {
             let tx = tx.clone();
             let rate_limited = rate_limited.clone();
             s.spawn(move |_| {
@@ -172,7 +194,7 @@ fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<Re
                         std::thread::sleep(Duration::from_secs(1));
                     }
                     // then try to get configs (which may trigger rate limiting)
-                    match config_files_and_rev_for_repo(&repo_url, git_cache_dir) {
+                    match config_files_and_rev_for_repo(&repo_url, git_cache_dir, update_existing) {
                         Ok((config_files, rev)) if !config_files.is_empty() => {
                             let info = RepoInfo::new(repo_url, rev, config_files);
                             tx.send(Message::Finished(info)).unwrap();
@@ -197,7 +219,7 @@ fn find_config_files(fonts: &BTreeSet<Metadata>, git_cache_dir: &Path) -> Vec<Re
                                 ConfigFetchIssue::BadRepoUrl(s) => s,
                                 ConfigFetchIssue::GitFail(e) => e.to_string(),
                                 ConfigFetchIssue::Http(e) => e.to_string(),
-                                ConfigFetchIssue::HttpErrorResponse(e) => e.to_string(),
+                                ConfigFetchIssue::HttpErrorResponse(e) => format!("http error {e}"),
                                 ConfigFetchIssue::NonEmptyTargetDir(path) => format!(
                                     "target directory '{}' exists and is non-empty",
                                     path.display()
@@ -277,6 +299,7 @@ enum ConfigFetchIssue {
 fn config_files_and_rev_for_repo(
     repo_url: &str,
     checkout_font_dir: &Path,
+    update_existing: bool,
 ) -> Result<(Vec<PathBuf>, GitRev), ConfigFetchIssue> {
     let local_repo_dir = repo_info::repo_path_for_url(repo_url, checkout_font_dir)
         .ok_or_else(|| ConfigFetchIssue::BadRepoUrl(repo_url.to_owned()))?;
@@ -301,7 +324,7 @@ fn config_files_and_rev_for_repo(
         std::fs::remove_dir(&local_repo_dir)
             .map_err(|_| ConfigFetchIssue::NonEmptyTargetDir(local_repo_dir.clone()))?;
     }
-    let configs = config_files_from_local_checkout(repo_url, &local_repo_dir)?;
+    let configs = config_files_from_local_checkout(repo_url, &local_repo_dir, update_existing)?;
     let rev = get_git_rev(&local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
     Ok((configs, rev))
 }
@@ -351,8 +374,21 @@ fn config_file_from_remote_http(repo_url: &str) -> Result<PathBuf, ConfigFetchIs
 fn config_files_from_local_checkout(
     repo_url: &str,
     local_repo_dir: &Path,
+    update_existing: bool,
 ) -> Result<Vec<PathBuf>, ConfigFetchIssue> {
     if local_repo_dir.exists() {
+        // if the repo exists _and_ we find at least one config, _and_ this flag
+        // is false, then we reuse the existing configs.
+        if !update_existing {
+            let configs: Vec<_> = iter_config_paths(local_repo_dir)?.collect();
+            if !configs.is_empty() {
+                return Ok(configs);
+            }
+            // but we will go ahead and update if there were no configs, since
+            // that's functionally the same as this repo not 'existing', for our
+            // purposes.
+        }
+
         // try fetch; but failure is okay
         let _ = fetch_latest(local_repo_dir);
         // should we always fetch? idk
@@ -503,6 +539,12 @@ fn checkout_rev(repo_dir: &Path, rev: &str) -> Result<bool, GitFail> {
     let _ = std::process::Command::new("git")
         .current_dir(repo_dir)
         .args(["fetch", "--unshallow"])
+        .output();
+
+    // but if they're _not_ shallow, we need normal fetch :/
+    let _ = std::process::Command::new("git")
+        .current_dir(repo_dir)
+        .args(["fetch"])
         .output();
 
     let result = std::process::Command::new("git")
