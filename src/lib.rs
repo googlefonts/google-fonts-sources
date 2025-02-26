@@ -621,7 +621,10 @@ mod tests {
             config_file_and_rev_from_remote_http("https://github.com/PaoloBiagini/Joan").is_ok()
         );
         assert!(matches!(
-            config_file_and_rev_from_remote_http("https://github.com/googlefonts/BethEllen"),
+            // definitely not a font
+            config_file_and_rev_from_remote_http(
+                "https://github.com/googlefonts/google-fonts-sources"
+            ),
             Err(ConfigFetchIssue::NoConfigFound)
         ));
     }
