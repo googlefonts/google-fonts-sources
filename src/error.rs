@@ -53,12 +53,8 @@ pub enum LoadRepoError {
         #[source]
         std::io::Error,
     ),
-    #[error("git failed: '{0}'")]
-    GitFail(
-        #[source]
-        #[from]
-        GitFail,
-    ),
+    #[error(transparent)]
+    GitFail(#[from] GitFail),
     /// The expected commit could not be found
     #[error("could not find commit '{sha}'")]
     NoCommit { sha: String },
@@ -80,14 +76,14 @@ pub enum LoadRepoError {
 #[derive(Debug, thiserror::Error)]
 pub enum GitFail {
     /// The git command itself does not execute
-    #[error("process failed: '{0}'")]
+    #[error("git process failed: '{0}'")]
     ProcessFailed(
         #[from]
         #[source]
         std::io::Error,
     ),
     /// The git command returns a non-zero status
-    #[error("command failed: in '{path}': '{stderr}'")]
+    #[error("git failed: '{stderr}'")]
     GitError { path: PathBuf, stderr: String },
 }
 
