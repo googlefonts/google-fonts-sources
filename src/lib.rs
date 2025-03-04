@@ -159,7 +159,8 @@ fn find_config_files(
 ) -> Vec<RepoInfo> {
     // messages sent from a worker thread
     enum Message {
-        Finished(Option<RepoInfo>),
+        Finished(RepoInfo),
+        NoConfigFound { repo_url: String },
         ErrorMsg { repo_url: String, msg: String },
         RateLimit(usize),
     }
@@ -178,6 +179,7 @@ fn find_config_files(
     // this fails we will then checkout the repo locally and look more closely.
     rayon::scope(|s| {
         let mut result = Vec::new();
+        let mut missing_config = Vec::new();
         let mut seen = 0;
         let mut sent = 0;
         let mut progressbar = kdam::tqdm!(total = repos_with_good_urls.len());
@@ -196,13 +198,15 @@ fn find_config_files(
                     // then try to get configs (which may trigger rate limiting)
                     match config_files_and_rev_for_repo(&repo_url, git_cache_dir, update_existing) {
                         Ok((config_files, rev)) if !config_files.is_empty() => {
-                            let info = RepoInfo::new(repo_url, rev, config_files);
-                            tx.send(Message::Finished(info)).unwrap();
+                            let repo_info = RepoInfo::new(repo_url, rev, config_files)
+                                .expect("url must be valid and we check if configs.is_empty()");
+                            tx.send(Message::Finished(repo_info)).unwrap();
+
                             break;
                         }
                         // no configs found or looking for configs failed:
                         Err(ConfigFetchIssue::NoConfigFound) | Ok(_) => {
-                            tx.send(Message::Finished(None)).unwrap();
+                            tx.send(Message::NoConfigFound { repo_url }).unwrap();
                             break;
                         }
                         // if we're rate limited, set the flag telling other threads
@@ -238,9 +242,11 @@ fn find_config_files(
         while seen < sent {
             match rx.recv() {
                 Ok(Message::Finished(info)) => {
-                    if let Some(info) = info {
-                        result.push(info);
-                    }
+                    result.push(info);
+                    seen += 1;
+                }
+                Ok(Message::NoConfigFound { repo_url }) => {
+                    missing_config.push(repo_url);
                     seen += 1;
                 }
                 Ok(Message::RateLimit(seconds)) => {
@@ -273,6 +279,9 @@ fn find_config_files(
                 }
             }
             progressbar.update(1).unwrap();
+        }
+        for missing in missing_config {
+            log::info!("no config found: {missing}");
         }
         result.sort_unstable();
         result
