@@ -119,6 +119,15 @@ impl RepoInfo {
     /// found, or if there is an io error.
     pub fn instantiate(&self, cache_dir: &Path) -> Result<PathBuf, LoadRepoError> {
         let font_dir = self.repo_path(cache_dir);
+
+        if font_dir.exists() && !font_dir.join(".git").exists() {
+            log::debug!("{} exists but is not a repo, removing", font_dir.display());
+            if let Err(e) = std::fs::remove_dir(&font_dir) {
+                // we don't want to remove a non-empty directory, just in case
+                log::warn!("could not remove {}: '{e}'", font_dir.display());
+            }
+        }
+
         if !font_dir.exists() {
             std::fs::create_dir_all(&font_dir)?;
             let repo_url = self.repo_url_with_auth_token_if_needed()?;
