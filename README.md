@@ -16,7 +16,7 @@ To use this tool from the command line, in order to generate a JSON dictionary
 containing information about source repositories:
 
 ```sh
-cargo run -- -o repo_list.json
+RUST_LOG=INFO cargo run -- -o repo_list.json
 ```
 
 To use this tool from another Rust crate, see [the docs].
