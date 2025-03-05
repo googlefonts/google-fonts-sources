@@ -399,8 +399,10 @@ fn config_files_from_local_checkout(
         }
 
         // try fetch; but failure is okay
-        let _ = fetch_latest(local_repo_dir);
-        // should we always fetch? idk
+        if let Err(e) = fetch_latest(local_repo_dir) {
+            log::warn!("fetch failed for {repo_url}: {e}");
+            return Err(ConfigFetchIssue::GitFail(e));
+        }
     } else {
         std::fs::create_dir_all(local_repo_dir).unwrap();
         clone_repo(repo_url, local_repo_dir).map_err(ConfigFetchIssue::GitFail)?;
@@ -604,12 +606,19 @@ fn clone_repo(url: &str, to_dir: &Path) -> Result<(), GitFail> {
 
 /// On success returns whether there were any changes
 fn fetch_latest(path: &Path) -> Result<(), GitFail> {
-    let output = std::process::Command::new("git")
+    let mut output = std::process::Command::new("git")
         // if a repo requires credentials fail instead of waiting
         .env("GIT_TERMINAL_PROMPT", "0")
-        .arg("pull")
+        .arg("fetch")
         .current_dir(path)
         .output()?;
+    if output.status.success() {
+        output = std::process::Command::new("git")
+            .arg("checkout")
+            .arg("origin/HEAD")
+            .current_dir(path)
+            .output()?;
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(GitFail::GitError {
