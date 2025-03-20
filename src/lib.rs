@@ -145,9 +145,8 @@ fn candidates_with_known_repo(candidates: &BTreeSet<Metadata>) -> BTreeSet<Metad
 /// By convention repositories containing sources we use should have a config file
 /// in the sources/ directory.
 ///
-/// This file is often called 'config.yaml', but it may be another name starting with
-/// 'config' (because multiple such files can exist) and it may also use 'yml'
-/// as an extension.
+/// This file is often called 'config.yaml', but it may be another name (because
+/// multiple such files can exist) and it may also use 'yml' as an extension.
 ///
 /// We naively look for the most common file names using a simple http request,
 /// and if we don't find anything then we clone the repo locally and inspect
@@ -417,9 +416,9 @@ fn config_files_from_local_checkout(
 
 /// Look for a file like 'config.yaml' in a google fonts font checkout.
 ///
-/// This will look for all files that begin with 'config' and have either the
-/// 'yaml' or 'yml' extension; if multiple files match this pattern it will
-/// return the one with the shortest name.
+/// This will look for all files that have either the 'yaml' or 'yml' extension;
+/// (except a few known exceptions such as fontbakery report results files)
+/// if multiple files match this pattern it will return the one with the shortest name.
 fn iter_config_paths(font_dir: &Path) -> Result<impl Iterator<Item = PathBuf>, ConfigFetchIssue> {
     #[allow(clippy::ptr_arg)] // we don't use &Path so we can pass this to a closure below
     fn looks_like_config_file(path: &PathBuf) -> bool {
@@ -428,7 +427,10 @@ fn iter_config_paths(font_dir: &Path) -> Result<impl Iterator<Item = PathBuf>, C
         else {
             return false;
         };
-        stem.starts_with("config") && (extension == "yaml" || extension == "yml")
+        !stem.starts_with("fontbakery")
+            && !stem.starts_with(".")
+            && !stem.starts_with("METADATA")
+            && (extension == "yaml" || extension == "yml")
     }
 
     let sources_dir = find_sources_dir(font_dir).ok_or(ConfigFetchIssue::NoConfigFound)?;
