@@ -142,22 +142,22 @@ impl RepoInfo {
         Ok(font_dir)
     }
 
-    /// Iterate paths to config files in this repo, checking it out if necessary
-    pub fn iter_configs(
-        &self,
-        cache_dir: &Path,
-    ) -> Result<impl Iterator<Item = PathBuf> + '_, LoadRepoError> {
+    /// Return paths to the config files for this repo, if any exist.
+    ///
+    /// Returns an error if the repo cannot be cloned, or if no config files
+    /// are found.
+    pub fn config_paths(&self, cache_dir: &Path) -> Result<Vec<PathBuf>, LoadRepoError> {
         let font_dir = self.instantiate(cache_dir)?;
-        let (left, right) = match super::iter_config_paths(&font_dir) {
-            Ok(iter) => (Some(iter), None),
-            Err(_) => (None, None),
-        };
-        let sources_dir = super::find_sources_dir(&font_dir).unwrap_or(font_dir);
-        Ok(left
-            .into_iter()
-            .flatten()
-            .chain(right)
-            .map(move |config| sources_dir.join(config)))
+        let sources_dir = super::find_sources_dir(&font_dir).unwrap_or_else(|| font_dir.clone());
+        let result = super::iter_config_paths(&font_dir)
+            .map_err(|_| LoadRepoError::NoConfig)?
+            .map(|config| sources_dir.join(config))
+            .collect::<Vec<_>>();
+        if result.is_empty() {
+            Err(LoadRepoError::NoConfig)
+        } else {
+            Ok(result)
+        }
     }
 
     /// Return a `Vec` of source files in this respository.
