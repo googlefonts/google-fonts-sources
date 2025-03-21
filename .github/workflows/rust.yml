@@ -45,5 +45,9 @@ jobs:
       - name: install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
+        # because --all-targets doesn't run doctests
       - name: cargo test
+        run: cargo test
+
+      - name: cargo test --all-targets --all-features
         run: cargo test  --all-targets --all-features
