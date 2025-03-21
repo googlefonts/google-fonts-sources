@@ -4,15 +4,17 @@
 //!
 //! ```no_run
 //! # use std::path::Path;
+//! use google_fonts_sources as gfsources;
 //! // get a list of repositories:
 //!
-//! let font_repo_cache = Path::new("~/where_i_want_to_checkout_fonts");
-//! let font_repos = google_fonts_sources::discover_sources(font_repo_cache).unwrap();
+//! let repo_cache = Path::new("~/where_i_want_to_checkout_fonts");
+//! let update_existing = true;
+//! let font_repos = gfsources::discover_sources(repo_cache, update_existing).unwrap();
 //!
 //! // for each repo we find, do something with each source:
 //!
 //! for repo in &font_repos {
-//!     let sources = match repo.get_sources(font_repo_cache) {
+//!     let sources = match repo.get_sources(repo_cache) {
 //!         Ok(sources) => sources,
 //!         Err(e) => {
 //!             eprintln!("skipping repo '{}': '{e}'", repo.repo_name());
