@@ -169,8 +169,7 @@ fn find_config_files(
 
     let repos_with_good_urls = fonts
         .iter()
-        .filter_map(Metadata::known_repo_url)
-        .map(String::from)
+        .filter(|md| md.known_repo_url().is_some())
         .collect::<Vec<_>>();
 
     // this big block is all about managing a threadpool that will identify
@@ -188,12 +187,27 @@ fn find_config_files(
         let rate_limited = Arc::new(AtomicBool::new(false));
 
         let (tx, rx) = channel();
-        for repo_url in repos_with_good_urls {
+        for metadata in repos_with_good_urls {
+            let repo_url = metadata.known_repo_url().unwrap().to_string();
             let tx = tx.clone();
             let rate_limited = rate_limited.clone();
             s.spawn(move |_| {
                 loop {
-                    // first, if we're currently rate-limited we spin:
+                    // first, we try to use the file specified at the config_yaml field of METADATA.pb
+                    if let Some(commit) = metadata.commit() {
+                        if let Some(config_file) = metadata.config_yaml() {
+                            let repo_info = RepoInfo::new(
+                                repo_url,
+                                commit.to_string(),
+                                vec![PathBuf::from(config_file)],
+                            )
+                            .expect("...");
+                            tx.send(Message::Finished(repo_info)).unwrap();
+
+                            break;
+                        }
+                    }
+                    // if we're currently rate-limited we spin:
                     while rate_limited.load(Ordering::Acquire) {
                         std::thread::sleep(Duration::from_secs(1));
                     }
