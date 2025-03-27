@@ -14,6 +14,8 @@ use crate::error::MetadataError;
 pub(crate) struct Metadata {
     pub(crate) name: String,
     repo_url: Option<String>,
+    commit: Option<String>,
+    config_yaml: Option<String>,
 }
 
 /// Ways parsing metadata can fail
@@ -23,9 +25,21 @@ pub(crate) enum BadMetadata {
 }
 
 impl Metadata {
-    fn new(name: String, repo_url: Option<&str>) -> Self {
+    fn new(
+        name: String,
+        repo_url: Option<&str>,
+        commit: Option<&str>,
+        config_yaml: Option<&str>,
+    ) -> Self {
         let repo_url = repo_url.and_then(post_process_repo_url);
-        Self { name, repo_url }
+        let config_yaml = config_yaml.and_then(post_process_config_yaml);
+        let commit = commit.and_then(post_process_commit);
+        Self {
+            name,
+            repo_url,
+            commit,
+            config_yaml,
+        }
     }
 
     pub fn load(path: &Path) -> Result<Self, MetadataError> {
@@ -48,6 +62,14 @@ impl Metadata {
             .as_deref()
             .filter(|s| s.starts_with("https://github.com") && ureq::http::Uri::from_str(s).is_ok())
     }
+
+    pub fn config_yaml(&self) -> Option<&str> {
+        self.config_yaml.as_deref()
+    }
+
+    pub fn commit(&self) -> Option<&str> {
+        self.commit.as_deref()
+    }
 }
 
 impl FromStr for Metadata {
@@ -55,18 +77,30 @@ impl FromStr for Metadata {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         static NAME_KEY: &str = "name: ";
         static REPO_KEY: &str = "repository_url: ";
+        static CONFIG_YAML_KEY: &str = "config_yaml: ";
+        static COMMIT_KEY: &str = "commit: ";
+
         let Some(pos) = s.find(NAME_KEY) else {
             return Err(BadMetadata::NoName);
         };
-
         let pos = pos + NAME_KEY.len();
         let name = extract_litstr(&s[pos..])
             .ok_or(BadMetadata::NoName)?
             .to_owned();
+
         let repo_url = s
             .find(REPO_KEY)
             .and_then(|pos| extract_litstr(&s[pos + REPO_KEY.len()..]));
-        Ok(Metadata::new(name, repo_url))
+
+        let config_yaml = s
+            .find(CONFIG_YAML_KEY)
+            .and_then(|pos| extract_litstr(&s[pos + CONFIG_YAML_KEY.len()..]));
+
+        let commit = s
+            .find(COMMIT_KEY)
+            .and_then(|pos| extract_litstr(&s[pos + COMMIT_KEY.len()..]));
+
+        Ok(Metadata::new(name, repo_url, commit, config_yaml))
     }
 }
 
@@ -84,6 +118,22 @@ fn post_process_repo_url(url: &str) -> Option<String> {
         url.to_owned()
     };
     Some(url)
+}
+
+fn post_process_config_yaml(config_yaml: &str) -> Option<String> {
+    let config_yaml = config_yaml.trim();
+    if config_yaml.is_empty() {
+        return None;
+    }
+    Some(config_yaml.to_owned())
+}
+
+fn post_process_commit(commit: &str) -> Option<String> {
+    let commit = commit.trim();
+    if commit.is_empty() {
+        return None;
+    }
+    Some(commit.to_owned())
 }
 
 /// extract the contents of a string literal, e.g. the stuff between the quotation marks
@@ -149,24 +199,38 @@ mod tests {
     fn metadata_urls() {
         // add https
         assert_eq!(
-            Metadata::new("hi".into(), Some("github.com/hi/mom")).known_repo_url(),
+            Metadata::new("hi".into(), Some("github.com/hi/mom"), None, None).known_repo_url(),
             Some("https://github.com/hi/mom")
         );
         // remove www
         assert_eq!(
-            Metadata::new("hi".into(), Some("https://www.github.com/hi/mom")).known_repo_url(),
+            Metadata::new(
+                "hi".into(),
+                Some("https://www.github.com/hi/mom"),
+                None,
+                None
+            )
+            .known_repo_url(),
             Some("https://github.com/hi/mom")
         );
         // ignore gitlab
         assert_eq!(
-            Metadata::new("hi".into(), Some("https://www.gitlab.com/hi/mom")).known_repo_url(),
+            Metadata::new(
+                "hi".into(),
+                Some("https://www.gitlab.com/hi/mom"),
+                None,
+                None
+            )
+            .known_repo_url(),
             None
         );
         // ignore invalid urls
         assert_eq!(
             Metadata::new(
                 "hi".into(),
-                Some("https://www.github.com/hi/mom but with spaces! that's bad")
+                Some("https://www.github.com/hi/mom but with spaces! that's bad"),
+                None,
+                None
             )
             .known_repo_url(),
             None
