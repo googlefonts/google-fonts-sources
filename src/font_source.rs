@@ -5,22 +5,23 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{error::LoadRepoError, Config};
+use serde::{de::Visitor, Deserializer};
 
-/// Information about a git repository containing font sources
+use crate::{error::LoadRepoError, Config, Metadata};
+
+/// Information about a font source in a git repository
 #[derive(
     Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 #[non_exhaustive]
-pub struct RepoInfo {
+pub struct FontSource {
     /// The repository's url
     pub repo_url: String,
-    /// The commit rev of the repository's main branch, at discovery time.
-    //NOTE: this is private because we want to force the use of `new` for
-    //construction, so we can ensure urls are well formed
+    /// The commit, as stored in the metadata file.
     rev: String,
-    /// The names of config files that exist in this repository's source directory
-    pub config_files: Vec<PathBuf>,
+    /// The path to the config file for this font, relative to the repo root.
+    #[serde(alias = "config_files", deserialize_with = "one_or_vec")]
+    pub config: PathBuf,
     /// If `true`, this is a private googlefonts repo.
     ///
     /// We don't discover these repos, but they can be specified in json and
@@ -30,30 +31,58 @@ pub struct RepoInfo {
     auth: bool,
 }
 
+// hack: `config_files` used to be a vec, and if this code runs against
+// an old json list we don't want to crash.
+fn one_or_vec<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct OneOrMoreConfigs;
+    impl<'de> Visitor<'de> for OneOrMoreConfigs {
+        type Value = PathBuf;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a config or vec of configs")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v.into())
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            seq.next_element()?
+                .ok_or_else(|| serde::de::Error::custom("expect a non-empty array"))
+        }
+    }
+
+    deserializer.deserialize_any(OneOrMoreConfigs)
+}
+
 // a little helper used above
 fn is_false(b: &bool) -> bool {
     !*b
 }
 
-impl RepoInfo {
-    /// Create a `RepoInfo` after some validation.
+impl FontSource {
+    /// Create a `FontSource` after some validation.
     ///
     /// Returns `None` if the url has some unexpected format, or if there are
     /// no config files
-    pub(crate) fn new(
-        repo_url: String,
-        rev: String,
-        mut config_files: Vec<PathBuf>,
-    ) -> Option<Self> {
+    pub(crate) fn new(repo_url: String, rev: String, config: PathBuf) -> Result<Self, String> {
         if repo_name_and_org_from_url(&repo_url).is_none() {
             log::warn!("unexpected repo url '{repo_url}'");
-            return None;
+            return Err(repo_url);
         }
-        config_files.sort_unstable();
-        Some(Self {
+        Ok(Self {
             repo_url,
             rev,
-            config_files,
+            config,
             auth: false,
         })
     }
@@ -146,17 +175,13 @@ impl RepoInfo {
     ///
     /// Returns an error if the repo cannot be cloned, or if no config files
     /// are found.
-    pub fn config_paths(&self, cache_dir: &Path) -> Result<Vec<PathBuf>, LoadRepoError> {
+    pub fn config_path(&self, cache_dir: &Path) -> Result<PathBuf, LoadRepoError> {
         let font_dir = self.instantiate(cache_dir)?;
-        let sources_dir = super::find_sources_dir(&font_dir).unwrap_or_else(|| font_dir.clone());
-        let result = super::iter_config_paths(&font_dir)
-            .map_err(|_| LoadRepoError::NoConfig)?
-            .map(|config| sources_dir.join(config))
-            .collect::<Vec<_>>();
-        if result.is_empty() {
+        let config_path = font_dir.join(&self.config);
+        if !config_path.exists() {
             Err(LoadRepoError::NoConfig)
         } else {
-            Ok(result)
+            Ok(config_path)
         }
     }
 
@@ -168,7 +193,7 @@ impl RepoInfo {
         let font_dir = self.instantiate(git_cache_dir)?;
         let source_dir = font_dir.join("sources");
         let configs = self
-            .config_files
+            .config
             .iter()
             .map(|filename| {
                 let config_path = source_dir.join(filename);
@@ -206,6 +231,34 @@ pub(super) fn repo_path_for_url(url: &str, base_cache_dir: &Path) -> Option<Path
     let mut path = base_cache_dir.join(org);
     path.push(name);
     Some(path)
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum TryFromMetadataError {
+    #[error("missing field '{0}'")]
+    MissingField(&'static str),
+    #[error("unfamiliar URL '{0}'")]
+    UnfamiliarUrl(String),
+}
+
+impl TryFrom<Metadata> for FontSource {
+    type Error = TryFromMetadataError;
+
+    fn try_from(meta: Metadata) -> Result<Self, Self::Error> {
+        if let Some(badurl) = meta.unknown_repo_url() {
+            return Err(TryFromMetadataError::UnfamiliarUrl(badurl.to_owned()));
+        }
+        FontSource::new(
+            meta.repo_url
+                .ok_or(TryFromMetadataError::MissingField("repo_url"))?,
+            meta.commit
+                .ok_or(TryFromMetadataError::MissingField("commit"))?,
+            meta.config_yaml
+                .ok_or(TryFromMetadataError::MissingField("config_yaml"))?
+                .into(),
+        )
+        .map_err(TryFromMetadataError::UnfamiliarUrl)
+    }
 }
 
 #[cfg(test)]

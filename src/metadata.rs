@@ -13,9 +13,9 @@ use crate::error::MetadataError;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Metadata {
     pub(crate) name: String,
-    repo_url: Option<String>,
-    commit: Option<String>,
-    config_yaml: Option<String>,
+    pub(crate) repo_url: Option<String>,
+    pub(crate) commit: Option<String>,
+    pub(crate) config_yaml: Option<String>,
 }
 
 /// Ways parsing metadata can fail
@@ -32,8 +32,12 @@ impl Metadata {
         config_yaml: Option<&str>,
     ) -> Self {
         let repo_url = repo_url.and_then(post_process_repo_url);
-        let config_yaml = config_yaml.and_then(post_process_config_yaml);
-        let commit = commit.and_then(post_process_commit);
+        let config_yaml = config_yaml
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        let commit = commit
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
         Self {
             name,
             repo_url,
@@ -57,18 +61,11 @@ impl Metadata {
     }
 
     /// If we have a repo_url and it is a host we know (github) use it
-    pub fn known_repo_url(&self) -> Option<&str> {
+    #[cfg(test)]
+    fn known_repo_url(&self) -> Option<&str> {
         self.repo_url
             .as_deref()
             .filter(|s| s.starts_with("https://github.com") && ureq::http::Uri::from_str(s).is_ok())
-    }
-
-    pub fn config_yaml(&self) -> Option<&str> {
-        self.config_yaml.as_deref()
-    }
-
-    pub fn commit(&self) -> Option<&str> {
-        self.commit.as_deref()
     }
 }
 
@@ -118,22 +115,6 @@ fn post_process_repo_url(url: &str) -> Option<String> {
         url.to_owned()
     };
     Some(url)
-}
-
-fn post_process_config_yaml(config_yaml: &str) -> Option<String> {
-    let config_yaml = config_yaml.trim();
-    if config_yaml.is_empty() {
-        return None;
-    }
-    Some(config_yaml.to_owned())
-}
-
-fn post_process_commit(commit: &str) -> Option<String> {
-    let commit = commit.trim();
-    if commit.is_empty() {
-        return None;
-    }
-    Some(commit.to_owned())
 }
 
 /// extract the contents of a string literal, e.g. the stuff between the quotation marks
