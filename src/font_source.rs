@@ -5,8 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{de::Visitor, Deserializer};
-
 use crate::{error::LoadRepoError, Config, Metadata};
 
 /// Information about a font source in a git repository
@@ -20,7 +18,7 @@ pub struct FontSource {
     /// The commit, as stored in the metadata file.
     rev: String,
     /// The path to the config file for this font, relative to the repo root.
-    #[serde(alias = "config_files", deserialize_with = "one_or_vec")]
+    #[serde(alias = "config_files")]
     pub config: PathBuf,
     /// If `true`, this is a private googlefonts repo.
     ///
@@ -38,39 +36,6 @@ pub struct FontSource {
     /// in that list.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) has_rev_conflict: bool,
-}
-
-// hack: `config_files` used to be a vec, and if this code runs against
-// an old json list we don't want to crash.
-fn one_or_vec<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct OneOrMoreConfigs;
-    impl<'de> Visitor<'de> for OneOrMoreConfigs {
-        type Value = PathBuf;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a config or vec of configs")
-        }
-
-        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v.into())
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: serde::de::SeqAccess<'de>,
-        {
-            seq.next_element()?
-                .ok_or_else(|| serde::de::Error::custom("expect a non-empty array"))
-        }
-    }
-
-    deserializer.deserialize_any(OneOrMoreConfigs)
 }
 
 // a little helper used above
