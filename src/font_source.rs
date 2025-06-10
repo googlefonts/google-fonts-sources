@@ -29,6 +29,15 @@ pub struct FontSource {
     /// via the `GITHUB_TOKEN` environment variable.
     #[serde(default, skip_serializing_if = "is_false")]
     auth: bool,
+    /// if `true`, there are multiple sources in this repo with different git revs.
+    ///
+    /// In this case we will check this source out into its own directory, with
+    /// the sha appended (like 'repo_$SHA') to disambiguate.
+    ///
+    /// This field is set in `crate::discover_sources`, and only considers sources
+    /// in that list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) has_rev_conflict: bool,
 }
 
 // hack: `config_files` used to be a vec, and if this code runs against
@@ -84,7 +93,20 @@ impl FontSource {
             rev,
             config,
             auth: false,
+            has_rev_conflict: false,
         })
+    }
+
+    /// just for testing: doesn't care if a URL is well formed/exists etc
+    #[cfg(test)]
+    pub(crate) fn for_test(url: &str, rev: &str, config: &str) -> Self {
+        Self {
+            repo_url: url.into(),
+            rev: rev.into(),
+            config: config.into(),
+            auth: false,
+            has_rev_conflict: false,
+        }
     }
 
     /// The name of the user or org that the repository lives under.
@@ -112,7 +134,21 @@ impl FontSource {
     /// This is in the format, `{cache_dir}/{repo_org}/{repo_name}`
     pub fn repo_path(&self, cache_dir: &Path) -> PathBuf {
         // unwrap is okay because we already know the url is well formed
-        repo_path_for_url(&self.repo_url, cache_dir).unwrap()
+        self.repo_path_for_url(cache_dir).unwrap()
+    }
+
+    fn repo_path_for_url(&self, cache_dir: &Path) -> Option<PathBuf> {
+        let (org, name) = repo_name_and_org_from_url(&self.repo_url)?;
+        let mut path = cache_dir.join(org);
+        if self.has_rev_conflict {
+            path.push(format!(
+                "{name}_{}",
+                self.rev.get(..10).unwrap_or(self.rev.as_str())
+            ));
+        } else {
+            path.push(name);
+        }
+        Some(path)
     }
 
     /// Return the URL we'll use to fetch the repo, handling authentication.
@@ -171,7 +207,7 @@ impl FontSource {
         Ok(font_dir)
     }
 
-    /// Return paths to the config files for this repo, if any exist.
+    /// Return path to the config file for this repo, if it exists.
     ///
     /// Returns an error if the repo cannot be cloned, or if no config files
     /// are found.
@@ -224,13 +260,6 @@ fn repo_name_and_org_from_url(url: &str) -> Option<(&str, &str)> {
     let (rest, name) = url.rsplit_once('/')?;
     let (_, org) = rest.rsplit_once('/')?;
     Some((org, name))
-}
-
-pub(super) fn repo_path_for_url(url: &str, base_cache_dir: &Path) -> Option<PathBuf> {
-    let (org, name) = repo_name_and_org_from_url(url)?;
-    let mut path = base_cache_dir.join(org);
-    path.push(name);
-    Some(path)
 }
 
 #[derive(Clone, Debug, thiserror::Error)]
