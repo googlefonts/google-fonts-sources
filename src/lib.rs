@@ -26,7 +26,7 @@
 //! ```
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -87,14 +87,58 @@ pub fn discover_sources(git_cache_dir: &Path) -> Result<Vec<FontSource>, Error> 
     log::info!("found {} metadata files", candidates.len());
     let sources: BTreeSet<_> = candidates
         .into_iter()
-        .filter_map(|meta| meta.try_into().ok())
+        .filter_map(|meta| match FontSource::try_from(meta.clone()) {
+            Ok(item) => Some(item),
+            Err(e) => {
+                log::warn!("bad metadata for '{}': {e}", meta.name);
+                None
+            }
+        })
         .collect();
 
     log::info!(
         "found {} fonts with repo/commit/config fields",
         sources.len()
     );
-    Ok(sources.into_iter().collect())
+    let sources = sources.into_iter().collect();
+    Ok(mark_rev_conflicts(sources))
+}
+
+fn mark_rev_conflicts(mut sources: Vec<FontSource>) -> Vec<FontSource> {
+    let mut revs = HashMap::new();
+
+    for source in &sources {
+        *revs
+            .entry(source.repo_url.clone())
+            .or_insert(BTreeMap::new())
+            .entry(source.git_rev().to_owned())
+            .or_insert(0u32) += 1;
+    }
+
+    revs.retain(|_k, v| v.len() > 1);
+    // in some cases several sources will share the same rev, while another
+    // source has a specific rev; so we want the most common rev to be the 'default'.
+    // In the case of ties, we choose the (lexicographic) `max` rev. (This is
+    // arbitrary, but deterministic.)
+    let has_conflict = revs
+        .iter()
+        .flat_map(|(repo, v)| {
+            let most_common = v.iter().max_by_key(|(rev, v)| (**v, *rev)).unwrap().0;
+            v.keys()
+                // only mark repos that don't use the most common rev
+                .filter_map(move |rev| {
+                    (rev != most_common).then_some((repo.as_str(), rev.as_str()))
+                })
+        })
+        .collect::<HashSet<_>>();
+
+    // finally mark the repos we consider a conflict
+    for source in &mut sources {
+        if has_conflict.contains(&(source.repo_url.as_str(), source.git_rev())) {
+            source.has_rev_conflict = true;
+        }
+    }
+    sources
 }
 
 fn update_google_fonts_checkout(path: &Path) -> Result<(), Error> {
@@ -250,4 +294,39 @@ fn fetch_latest(path: &Path) -> Result<(), GitFail> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mark_conflicts() {
+        let items_and_expected_conflict = vec![
+            (FontSource::for_test("hello", "abc", "config.yaml"), false),
+            (FontSource::for_test("hi", "abc", "config_one.yaml"), false),
+            (FontSource::for_test("hi", "def", "config_two.yaml"), true),
+            (
+                FontSource::for_test("hi", "abc", "config_three.yaml"),
+                false,
+            ),
+            (FontSource::for_test("oopsy", "123", "config.yaml"), true),
+            (
+                FontSource::for_test("oopsy", "456", "config_hi.yaml"),
+                false,
+            ),
+        ];
+
+        let (items, expected): (Vec<_>, Vec<_>) =
+            items_and_expected_conflict.iter().cloned().unzip();
+
+        let items = mark_rev_conflicts(items);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.has_rev_conflict)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 }
