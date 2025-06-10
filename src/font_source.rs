@@ -161,6 +161,7 @@ impl FontSource {
         if !font_dir.exists() {
             std::fs::create_dir_all(&font_dir)?;
             let repo_url = self.repo_url_with_auth_token_if_needed()?;
+            log::info!("cloning {repo_url}");
             super::clone_repo(&repo_url, &font_dir)?;
         }
 

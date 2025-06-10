@@ -12,7 +12,7 @@
 //!
 //! // for each repo we find, do something with each source:
 //!
-//! for repo in &font_repos {
+//! for repo in &font_repos.sources {
 //!     let sources = match repo.get_sources(repo_cache) {
 //!         Ok(sources) => sources,
 //!         Err(e) => {
@@ -30,6 +30,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::{de, Deserialize, Serialize};
+
 mod args;
 mod config;
 mod error;
@@ -46,12 +48,34 @@ use metadata::Metadata;
 static GF_REPO_URL: &str = "https://github.com/google/fonts";
 static METADATA_FILE: &str = "METADATA.pb";
 
+const CURRENT_VERSION: Version = Version { major: 1, minor: 0 };
+
+/// A (major, minor) version number.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version {
+    pub major: u16,
+    pub minor: u16,
+}
+
+/// A versioned file format representing a set of font sources
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SourceSet {
+    /// The (major, minor) vesion. Serializes as a string.
+    version: Version,
+    /// The list of discovered sources.
+    pub sources: Vec<FontSource>,
+}
+
 /// entry point for the cli tool
 #[doc(hidden)] // only intended to be used from our binary
 pub fn run(args: &Args) {
     let repos = discover_sources(&args.fonts_dir).unwrap_or_die(|e| eprintln!("{e}"));
     let output = if args.list {
-        let urls = repos.into_iter().map(|r| r.repo_url).collect::<Vec<_>>();
+        let urls = repos
+            .sources
+            .iter()
+            .map(|r| r.repo_url.as_str())
+            .collect::<Vec<_>>();
         urls.join("\n")
     } else {
         serde_json::to_string_pretty(&repos)
@@ -80,7 +104,7 @@ pub fn run(args: &Args) {
 /// sense to cache these in most cases.
 ///
 /// [google/fonts]: https://github.com/google/fonts
-pub fn discover_sources(git_cache_dir: &Path) -> Result<Vec<FontSource>, Error> {
+pub fn discover_sources(git_cache_dir: &Path) -> Result<SourceSet, Error> {
     let google_slash_fonts = git_cache_dir.join("google/fonts");
     update_google_fonts_checkout(&google_slash_fonts)?;
     let candidates = find_ofl_metadata_files(&google_slash_fonts);
@@ -101,7 +125,11 @@ pub fn discover_sources(git_cache_dir: &Path) -> Result<Vec<FontSource>, Error> 
         sources.len()
     );
     let sources = sources.into_iter().collect();
-    Ok(mark_rev_conflicts(sources))
+    let sources = mark_rev_conflicts(sources);
+    Ok(SourceSet {
+        version: CURRENT_VERSION,
+        sources,
+    })
 }
 
 fn mark_rev_conflicts(mut sources: Vec<FontSource>) -> Vec<FontSource> {
@@ -296,6 +324,38 @@ fn fetch_latest(path: &Path) -> Result<(), GitFail> {
     Ok(())
 }
 
+impl Serialize for Version {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        format!("{}.{}", self.major, self.minor).serialize(serializer)
+    }
+}
+
+// we currently only have one version, so let's keep this simple, we'll need
+// to figure out a better approach if we add more stuff in the future.
+impl<'de> Deserialize<'de> for Version {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw: &str = Deserialize::deserialize(deserializer)?;
+        let (major, minor) = raw
+            .split_once('.')
+            .ok_or(de::Error::custom("invalid version"))?;
+        let major = major.parse();
+        let minor = minor.parse();
+        match (major, minor) {
+            (Ok(major), Ok(minor)) if major != 1 => Err(de::Error::custom(format!(
+                "unsupported version {major}.{minor}"
+            ))),
+            (Ok(major), Ok(minor)) => Ok(Version { major, minor }),
+            _ => Err(de::Error::custom("invalid version")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +388,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+
+    #[test]
+    fn roundtrip() {
+        let thingie = SourceSet {
+            version: Version { major: 1, minor: 0 },
+            sources: vec![FontSource::for_test("hi", "abc", "config.yaml")],
+        };
+
+        let serd = serde_json::to_string(&thingie).unwrap();
+        let de: SourceSet = serde_json::from_str(&serd).unwrap();
+
+        assert_eq!(thingie, de);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported version")]
+    fn deny_unknown_version() {
+        let bad_thingie = SourceSet {
+            version: Version { major: 2, minor: 0 },
+            sources: Vec::new(),
+        };
+
+        let serd = serde_json::to_string(&bad_thingie).unwrap();
+        let _de: SourceSet = serde_json::from_str(&serd).unwrap();
     }
 }
