@@ -193,24 +193,13 @@ impl FontSource {
     /// '{git_cache_dir}/{repo_org}/{repo_name}'.
     pub fn get_sources(&self, git_cache_dir: &Path) -> Result<Vec<PathBuf>, LoadRepoError> {
         let font_dir = self.instantiate(git_cache_dir)?;
-        let source_dir = font_dir.join("sources");
-        let configs = self
-            .config
+        let config_path = font_dir.join(&self.config);
+        let config = Config::load(&config_path)?;
+        let mut sources = config
+            .sources
             .iter()
-            .map(|filename| {
-                let config_path = source_dir.join(filename);
-                Config::load(&config_path)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if configs.is_empty() {
-            return Err(LoadRepoError::NoConfig);
-        }
-
-        let mut sources = configs
-            .iter()
-            .flat_map(|c| c.sources.iter())
             .filter_map(|source| {
-                let source = source_dir.join(source);
+                let source = config_path.parent().unwrap_or(&font_dir).join(source);
                 source.exists().then_some(source)
             })
             .collect::<Vec<_>>();
