@@ -260,4 +260,22 @@ mod tests {
             Some(("hyper-type", "Advent")),
         );
     }
+
+    #[test]
+    fn test_non_sources_config() {
+        let source = FontSource::for_test(
+            "https://github.com/danhhong/Nokora",
+            "9c5f991b700b9be3519315a854a7b986e6877ace",
+            "Source/builder.yaml",
+        );
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sources = source
+            .get_sources(temp_dir.path())
+            .expect("should be able to get sources");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0],
+            temp_dir.path().join("danhhong/Nokora/Source/Nokora.glyphs")
+        );
+    }
 }
