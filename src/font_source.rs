@@ -18,8 +18,17 @@ pub struct FontSource {
     /// The commit, as stored in the metadata file.
     rev: String,
     /// The path to the config file for this font, relative to the repo root.
-    #[serde(alias = "config_files")]
+    ///
+    /// (if it is a virtual config, it is relative to the git cache root.)
     pub config: PathBuf,
+    /// If `true`, this config does not exist in the repo
+    ///
+    /// In this case the config actually lives in the google/fonts repository,
+    /// alongside the metadata file.
+    ///
+    /// Virtual configs are treated as if they live at `$REPO/source/config.yaml`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    config_is_virtual: bool,
     /// If `true`, this is a private googlefonts repo.
     ///
     /// We don't discover these repos, but they can be specified in json and
@@ -59,7 +68,25 @@ impl FontSource {
             config,
             auth: false,
             has_rev_conflict: false,
+            config_is_virtual: false,
         })
+    }
+
+    pub(crate) fn with_virtual_config(
+        metadata: Metadata,
+        virtual_config_path: &Path,
+    ) -> Result<Self, TryFromMetadataError> {
+        let repo_url = metadata
+            .repo_url
+            .ok_or(TryFromMetadataError::MissingField("repo_url"))?;
+        let commit = metadata
+            .commit
+            .ok_or(TryFromMetadataError::MissingField("commit"))?;
+
+        let mut result = Self::new(repo_url, commit, virtual_config_path.to_path_buf())
+            .map_err(TryFromMetadataError::UnfamiliarUrl)?;
+        result.config_is_virtual = true;
+        Ok(result)
     }
 
     /// just for testing: doesn't care if a URL is well formed/exists etc
@@ -71,6 +98,7 @@ impl FontSource {
             config: config.into(),
             auth: false,
             has_rev_conflict: false,
+            config_is_virtual: false,
         }
     }
 
@@ -173,13 +201,28 @@ impl FontSource {
         Ok(font_dir)
     }
 
+    /// A 'virtual' config is one that does not exist in the source repository.
+    ///
+    /// Instead it lives in the google/fonts repository, alongside the metadata
+    /// file for this family.
+    ///
+    /// The caller must figure out how to handle this. The actual config path can
+    /// be retrieved using the [`config_path`][Self::config_path] method here.
+    pub fn config_is_virtual(&self) -> bool {
+        self.config_is_virtual
+    }
+
     /// Return path to the config file for this repo, if it exists.
     ///
     /// Returns an error if the repo cannot be cloned, or if no config files
     /// are found.
     pub fn config_path(&self, cache_dir: &Path) -> Result<PathBuf, LoadRepoError> {
-        let font_dir = self.instantiate(cache_dir)?;
-        let config_path = font_dir.join(&self.config);
+        let base_dir = if self.config_is_virtual() {
+            cache_dir.to_owned()
+        } else {
+            self.instantiate(cache_dir)?
+        };
+        let config_path = base_dir.join(&self.config);
         if !config_path.exists() {
             Err(LoadRepoError::NoConfig)
         } else {
@@ -225,6 +268,7 @@ pub enum TryFromMetadataError {
     UnfamiliarUrl(String),
 }
 
+/// The impl does not account for possible virtual config files.
 impl TryFrom<Metadata> for FontSource {
     type Error = TryFromMetadataError;
 

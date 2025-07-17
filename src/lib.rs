@@ -40,13 +40,14 @@ mod metadata;
 
 pub use args::Args;
 pub use config::Config;
+use error::UnwrapOrDie;
 pub use error::{BadConfig, Error, GitFail, LoadRepoError};
-use error::{MetadataError, UnwrapOrDie};
 pub use font_source::FontSource;
 use metadata::Metadata;
 
 static GF_REPO_URL: &str = "https://github.com/google/fonts";
 static METADATA_FILE: &str = "METADATA.pb";
+static VIRTUAL_CONFIG_FILE: &str = "config.yaml";
 
 const CURRENT_VERSION: Version = Version { major: 1, minor: 0 };
 
@@ -111,11 +112,22 @@ pub fn discover_sources(git_cache_dir: &Path) -> Result<SourceSet, Error> {
     log::info!("found {} metadata files", candidates.len());
     let sources: BTreeSet<_> = candidates
         .into_iter()
-        .filter_map(|meta| match FontSource::try_from(meta.clone()) {
-            Ok(item) => Some(item),
-            Err(e) => {
-                log::warn!("bad metadata for '{}': {e}", meta.name);
-                None
+        .filter_map(|(meta, path)| {
+            let virtual_config_path = path.with_file_name(VIRTUAL_CONFIG_FILE);
+            let virtual_config = virtual_config_path
+                .exists()
+                .then(|| virtual_config_path.strip_prefix(git_cache_dir).unwrap());
+
+            let src = match virtual_config {
+                Some(config) => FontSource::with_virtual_config(meta.clone(), config),
+                None => FontSource::try_from(meta.clone()),
+            };
+            match src {
+                Ok(item) => Some(item),
+                Err(e) => {
+                    log::warn!("bad metadata for '{}': {e}", meta.name);
+                    None
+                }
             }
         })
         .collect();
@@ -181,13 +193,14 @@ fn update_google_fonts_checkout(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn find_ofl_metadata_files(path: &Path) -> BTreeSet<Metadata> {
+fn find_ofl_metadata_files(path: &Path) -> BTreeSet<(Metadata, PathBuf)> {
     let ofl_dir = path.join("ofl");
     log::debug!("searching for candidates in {}", ofl_dir.display());
     let mut result = BTreeSet::new();
     for font_dir in iter_ofl_subdirectories(&ofl_dir) {
-        let metadata = match load_metadata(&font_dir) {
-            Ok(metadata) => metadata,
+        let metadata_path = font_dir.join(METADATA_FILE);
+        let metadata = match Metadata::load(&metadata_path) {
+            Ok(metadata) => (metadata, metadata_path),
             Err(e) => {
                 log::debug!("no metadata for font {}: '{}'", font_dir.display(), e);
                 continue;
@@ -265,11 +278,6 @@ fn checkout_rev(repo_dir: &Path, rev: &str) -> Result<bool, GitFail> {
         log::warn!("failed to find rev {rev} for {}", repo_dir.display());
         Ok(false)
     }
-}
-
-fn load_metadata(path: &Path) -> Result<Metadata, MetadataError> {
-    let meta_path = path.join(METADATA_FILE);
-    Metadata::load(&meta_path)
 }
 
 fn iter_ofl_subdirectories(path: &Path) -> impl Iterator<Item = PathBuf> {
