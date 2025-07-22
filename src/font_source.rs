@@ -19,16 +19,16 @@ pub struct FontSource {
     rev: String,
     /// The path to the config file for this font, relative to the repo root.
     ///
-    /// (if it is a virtual config, it is relative to the git cache root.)
+    /// (if it is an external config, it is relative to the git cache root.)
     pub config: PathBuf,
     /// If `true`, this config does not exist in the repo
     ///
     /// In this case the config actually lives in the google/fonts repository,
     /// alongside the metadata file.
     ///
-    /// Virtual configs are treated as if they live at `$REPO/source/config.yaml`.
+    /// External configs are treated as if they live at `$REPO/source/config.yaml`.
     #[serde(default, skip_serializing_if = "is_false")]
-    config_is_virtual: bool,
+    config_is_external: bool,
     /// If `true`, this is a private googlefonts repo.
     ///
     /// We don't discover these repos, but they can be specified in json and
@@ -68,13 +68,13 @@ impl FontSource {
             config,
             auth: false,
             has_rev_conflict: false,
-            config_is_virtual: false,
+            config_is_external: false,
         })
     }
 
-    pub(crate) fn with_virtual_config(
+    pub(crate) fn with_external_config(
         metadata: Metadata,
-        virtual_config_path: &Path,
+        external_config_path: &Path,
     ) -> Result<Self, TryFromMetadataError> {
         let repo_url = metadata
             .repo_url
@@ -83,9 +83,9 @@ impl FontSource {
             .commit
             .ok_or(TryFromMetadataError::MissingField("commit"))?;
 
-        let mut result = Self::new(repo_url, commit, virtual_config_path.to_path_buf())
+        let mut result = Self::new(repo_url, commit, external_config_path.to_path_buf())
             .map_err(TryFromMetadataError::UnfamiliarUrl)?;
-        result.config_is_virtual = true;
+        result.config_is_external = true;
         Ok(result)
     }
 
@@ -98,7 +98,7 @@ impl FontSource {
             config: config.into(),
             auth: false,
             has_rev_conflict: false,
-            config_is_virtual: false,
+            config_is_external: false,
         }
     }
 
@@ -201,15 +201,15 @@ impl FontSource {
         Ok(font_dir)
     }
 
-    /// A 'virtual' config is one that does not exist in the source repository.
+    /// An 'external' config is one that does not exist in the source repository.
     ///
     /// Instead it lives in the google/fonts repository, alongside the metadata
     /// file for this family.
     ///
     /// The caller must figure out how to handle this. The actual config path can
     /// be retrieved using the [`config_path`][Self::config_path] method here.
-    pub fn config_is_virtual(&self) -> bool {
-        self.config_is_virtual
+    pub fn config_is_external(&self) -> bool {
+        self.config_is_external
     }
 
     /// Return path to the config file for this repo, if it exists.
@@ -217,7 +217,7 @@ impl FontSource {
     /// Returns an error if the repo cannot be cloned, or if no config files
     /// are found.
     pub fn config_path(&self, cache_dir: &Path) -> Result<PathBuf, LoadRepoError> {
-        let base_dir = if self.config_is_virtual() {
+        let base_dir = if self.config_is_external() {
             cache_dir.to_owned()
         } else {
             self.instantiate(cache_dir)?
@@ -268,7 +268,7 @@ pub enum TryFromMetadataError {
     UnfamiliarUrl(String),
 }
 
-/// The impl does not account for possible virtual config files.
+/// The impl does not account for possible external config files.
 impl TryFrom<Metadata> for FontSource {
     type Error = TryFromMetadataError;
 
