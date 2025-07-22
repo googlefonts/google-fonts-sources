@@ -47,7 +47,7 @@ use metadata::Metadata;
 
 static GF_REPO_URL: &str = "https://github.com/google/fonts";
 static METADATA_FILE: &str = "METADATA.pb";
-static VIRTUAL_CONFIG_FILE: &str = "config.yaml";
+static EXTERNAL_CONFIG_FILE: &str = "config.yaml";
 
 const CURRENT_VERSION: Version = Version { major: 1, minor: 0 };
 
@@ -113,13 +113,13 @@ pub fn discover_sources(git_cache_dir: &Path) -> Result<SourceSet, Error> {
     let sources: BTreeSet<_> = candidates
         .into_iter()
         .filter_map(|(meta, path)| {
-            let virtual_config_path = path.with_file_name(VIRTUAL_CONFIG_FILE);
-            let virtual_config = virtual_config_path
+            let external_config_path = path.with_file_name(EXTERNAL_CONFIG_FILE);
+            let external_config = external_config_path
                 .exists()
-                .then(|| virtual_config_path.strip_prefix(git_cache_dir).unwrap());
+                .then(|| external_config_path.strip_prefix(git_cache_dir).unwrap());
 
-            let src = match virtual_config {
-                Some(config) => FontSource::with_virtual_config(meta.clone(), config),
+            let src = match external_config {
+                Some(config) => FontSource::with_external_config(meta.clone(), config),
                 None => FontSource::try_from(meta.clone()),
             };
             match src {
