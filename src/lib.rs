@@ -108,7 +108,7 @@ pub fn run(args: &Args) {
 pub fn discover_sources(git_cache_dir: &Path) -> Result<SourceSet, Error> {
     let google_slash_fonts = git_cache_dir.join("google/fonts");
     update_google_fonts_checkout(&google_slash_fonts)?;
-    let candidates = find_ofl_metadata_files(&google_slash_fonts);
+    let candidates = find_metadata_files(&google_slash_fonts);
     log::info!("found {} metadata files", candidates.len());
     let sources: BTreeSet<_> = candidates
         .into_iter()
@@ -193,20 +193,23 @@ fn update_google_fonts_checkout(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn find_ofl_metadata_files(path: &Path) -> BTreeSet<(Metadata, PathBuf)> {
-    let ofl_dir = path.join("ofl");
-    log::debug!("searching for candidates in {}", ofl_dir.display());
+fn find_metadata_files(path: &Path) -> BTreeSet<(Metadata, PathBuf)> {
+    let licenses = ["ofl", "ufl", "apache"];
     let mut result = BTreeSet::new();
-    for font_dir in iter_ofl_subdirectories(&ofl_dir) {
-        let metadata_path = font_dir.join(METADATA_FILE);
-        let metadata = match Metadata::load(&metadata_path) {
-            Ok(metadata) => (metadata, metadata_path),
-            Err(e) => {
-                log::debug!("no metadata for font {}: '{}'", font_dir.display(), e);
-                continue;
-            }
-        };
-        result.insert(metadata);
+    for license in licenses {
+        let license_dir = path.join(license);
+        log::debug!("searching for candidates in {}", license_dir.display());
+        for font_dir in iter_license_subdirectories(&license_dir) {
+            let metadata_path = font_dir.join(METADATA_FILE);
+            let metadata = match Metadata::load(&metadata_path) {
+                Ok(metadata) => (metadata, metadata_path),
+                Err(e) => {
+                    log::debug!("no metadata for font {}: '{}'", font_dir.display(), e);
+                    continue;
+                }
+            };
+            result.insert(metadata);
+        }
     }
     result
 }
@@ -280,9 +283,10 @@ fn checkout_rev(repo_dir: &Path, rev: &str) -> Result<bool, GitFail> {
     }
 }
 
-fn iter_ofl_subdirectories(path: &Path) -> impl Iterator<Item = PathBuf> {
-    let contents =
-        std::fs::read_dir(path).unwrap_or_die(|e| eprintln!("failed to read ofl directory: '{e}'"));
+fn iter_license_subdirectories(path: &Path) -> impl Iterator<Item = PathBuf> {
+    let path_str = path.display();
+    let contents = std::fs::read_dir(path)
+        .unwrap_or_die(|e| eprintln!("failed to read '{path_str}' directory: '{e}'"));
     contents.filter_map(|entry| entry.ok().map(|d| d.path()).filter(|p| p.is_dir()))
 }
 
