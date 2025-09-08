@@ -145,7 +145,7 @@ impl FontSource {
     }
 
     /// Return the URL we'll use to fetch the repo, handling authentication.
-    fn repo_url_with_auth_token_if_needed(&self) -> Result<Cow<str>, LoadRepoError> {
+    fn repo_url_with_auth_token_if_needed(&self) -> Result<Cow<'_, str>, LoadRepoError> {
         if self.auth {
             let auth_token =
                 std::env::var("GITHUB_TOKEN").map_err(|_| LoadRepoError::MissingAuth)?;
