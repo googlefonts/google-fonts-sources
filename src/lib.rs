@@ -48,8 +48,10 @@ use metadata::Metadata;
 static GF_REPO_URL: &str = "https://github.com/google/fonts";
 static METADATA_FILE: &str = "METADATA.pb";
 static EXTERNAL_CONFIG_FILE: &str = "config.yaml";
+// github.com/google/fonts
+static GOOGLE_FONTS_REPO: &str = "google/fonts";
 
-const CURRENT_VERSION: Version = Version { major: 1, minor: 0 };
+const CURRENT_VERSION: Version = Version { major: 1, minor: 1 };
 
 /// A (major, minor) version number.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,11 +62,35 @@ pub struct Version {
 
 /// A versioned file format representing a set of font sources
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SourceSet {
     /// The (major, minor) vesion. Serializes as a string.
     version: Version,
+    /// Sha of the google/fonts repository
+    #[serde(default = "sha_of_google_slash_fonts_repo_as_of_writing")]
+    fonts_repo_sha: String,
     /// The list of discovered sources.
     pub sources: Vec<FontSource>,
+}
+
+// if loading older source sets, we supply a default sha (HEAD as of this commit)
+fn sha_of_google_slash_fonts_repo_as_of_writing() -> String {
+    "072f204fd0fce2f1cd6551a0c280684ed73b49f9".into()
+}
+
+impl SourceSet {
+    /// Update the google/fonts repo to the correct commit for these sources.
+    ///
+    /// Will clone the repo if it does not exist in the cache dir. Returns an
+    /// error if a git operation fails.
+    pub fn update_fonts_repo(&self, git_cache_dir: &Path) -> Result<(), Error> {
+        let repo_path = git_cache_dir.join(GOOGLE_FONTS_REPO);
+        if !repo_path.exists() {
+            clone_repo(GF_REPO_URL, &repo_path)?;
+        }
+        checkout_rev(&repo_path, &self.fonts_repo_sha)?;
+        Ok(())
+    }
 }
 
 /// entry point for the cli tool
@@ -106,8 +132,8 @@ pub fn run(args: &Args) {
 ///
 /// [google/fonts]: https://github.com/google/fonts
 pub fn discover_sources(git_cache_dir: &Path) -> Result<SourceSet, Error> {
-    let google_slash_fonts = git_cache_dir.join("google/fonts");
-    update_google_fonts_checkout(&google_slash_fonts)?;
+    let google_slash_fonts = git_cache_dir.join(GOOGLE_FONTS_REPO);
+    let fonts_repo_sha = update_google_fonts_checkout(&google_slash_fonts)?;
     let candidates = find_metadata_files(&google_slash_fonts);
     log::info!("found {} metadata files", candidates.len());
     let sources: BTreeSet<_> = candidates
@@ -141,6 +167,7 @@ pub fn discover_sources(git_cache_dir: &Path) -> Result<SourceSet, Error> {
     Ok(SourceSet {
         version: CURRENT_VERSION,
         sources,
+        fonts_repo_sha,
     })
 }
 
@@ -181,7 +208,7 @@ fn mark_rev_conflicts(mut sources: Vec<FontSource>) -> Vec<FontSource> {
     sources
 }
 
-fn update_google_fonts_checkout(path: &Path) -> Result<(), Error> {
+fn update_google_fonts_checkout(path: &Path) -> Result<String, Error> {
     if !path.exists() {
         log::info!("cloning {GF_REPO_URL} to {}", path.display());
         std::fs::create_dir_all(path)?;
@@ -190,7 +217,7 @@ fn update_google_fonts_checkout(path: &Path) -> Result<(), Error> {
         log::info!("fetching latest from {GF_REPO_URL}");
         fetch_latest(path)?;
     }
-    Ok(())
+    get_git_rev(path).map_err(Into::into)
 }
 
 fn find_metadata_files(path: &Path) -> BTreeSet<(Metadata, PathBuf)> {
@@ -407,6 +434,7 @@ mod tests {
         let thingie = SourceSet {
             version: Version { major: 1, minor: 0 },
             sources: vec![FontSource::for_test("hi", "abc", "config.yaml")],
+            fonts_repo_sha: "abcdefg".into(),
         };
 
         let serd = serde_json::to_string(&thingie).unwrap();
@@ -421,6 +449,7 @@ mod tests {
         let bad_thingie = SourceSet {
             version: Version { major: 2, minor: 0 },
             sources: Vec::new(),
+            fonts_repo_sha: "ohno".into(),
         };
 
         let serd = serde_json::to_string(&bad_thingie).unwrap();
