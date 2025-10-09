@@ -86,6 +86,7 @@ impl SourceSet {
     pub fn update_fonts_repo(&self, git_cache_dir: &Path) -> Result<(), Error> {
         let repo_path = git_cache_dir.join(GOOGLE_FONTS_REPO);
         if !repo_path.exists() {
+            std::fs::create_dir_all(&repo_path)?;
             clone_repo(GF_REPO_URL, &repo_path)?;
         }
         checkout_rev(&repo_path, &self.fonts_repo_sha)?;
