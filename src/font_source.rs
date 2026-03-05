@@ -133,14 +133,10 @@ impl FontSource {
     fn repo_path_for_url(&self, cache_dir: &Path) -> Option<PathBuf> {
         let (org, name) = repo_name_and_org_from_url(&self.repo_url)?;
         let mut path = cache_dir.join(org);
-        if self.has_rev_conflict {
-            path.push(format!(
-                "{name}_{}",
-                self.rev.get(..10).unwrap_or(self.rev.as_str())
-            ));
-        } else {
-            path.push(name);
-        }
+        path.push(format!(
+            "{name}_{}",
+            self.rev.get(..10).unwrap_or(self.rev.as_str())
+        ));
         Some(path)
     }
 
@@ -319,7 +315,7 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(
             sources[0],
-            temp_dir.path().join("danhhong/Nokora/Source/Nokora.glyphs")
+            temp_dir.path().join("danhhong/Nokora_9c5f991b70/Source/Nokora.glyphs")
         );
     }
 }
