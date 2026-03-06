@@ -85,6 +85,14 @@ impl SourceSet {
     /// error if a git operation fails.
     pub fn update_fonts_repo(&self, git_cache_dir: &Path) -> Result<(), Error> {
         let repo_path = git_cache_dir.join(GOOGLE_FONTS_REPO);
+        if repo_path.exists() && !repo_path.join(".git").exists() {
+            log::debug!("{} exists but is not a repo, removing", repo_path.display());
+            if let Err(e) = std::fs::remove_dir(&repo_path) {
+                // we don't want to remove a non-empty directory, just in case
+                log::warn!("could not remove google/fonts: '{e}'");
+            }
+        }
+
         if !repo_path.exists() {
             std::fs::create_dir_all(&repo_path)?;
             clone_repo(GF_REPO_URL, &repo_path)?;
@@ -285,11 +293,6 @@ fn checkout_rev(repo_dir: &Path, rev: &str) -> Result<bool, GitFail> {
         "repo {} needs fetch for {rev} (at {sha})",
         repo_dir.display()
     );
-    // checkouts might be shallow, so unshallow before looking for a rev:
-    let _ = std::process::Command::new("git")
-        .current_dir(repo_dir)
-        .args(["fetch", "--unshallow"])
-        .output();
 
     // but if they're _not_ shallow, we need normal fetch :/
     let _ = std::process::Command::new("git")
@@ -320,11 +323,11 @@ fn iter_license_subdirectories(path: &Path) -> impl Iterator<Item = PathBuf> {
 
 fn clone_repo(url: &str, to_dir: &Path) -> Result<(), GitFail> {
     assert!(to_dir.exists());
+    log::debug!("cloning '{url}' to '{}'", to_dir.display());
     let output = std::process::Command::new("git")
         // if a repo requires credentials fail instead of waiting
         .env("GIT_TERMINAL_PROMPT", "0")
         .arg("clone")
-        .args(["--depth", "1"])
         .arg(url)
         .arg(to_dir)
         .output()?;
@@ -402,7 +405,7 @@ mod tests {
 
     #[test]
     fn mark_conflicts() {
-        let items_and_expected_conflict = vec![
+        let items_and_expected_conflict = [
             (FontSource::for_test("hello", "abc", "config.yaml"), false),
             (FontSource::for_test("hi", "abc", "config_one.yaml"), false),
             (FontSource::for_test("hi", "def", "config_two.yaml"), true),
