@@ -1,9 +1,8 @@
 //! font repository information
 
-use std::{
-    borrow::Cow,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+use ureq::typestate::WithoutBody;
 
 use crate::{error::LoadRepoError, Config, Metadata};
 
@@ -140,60 +139,63 @@ impl FontSource {
         Some(path)
     }
 
-    /// Return the URL we'll use to fetch the repo, handling authentication.
-    fn repo_url_with_auth_token_if_needed(&self) -> Result<Cow<'_, str>, LoadRepoError> {
+    /// Build the HTTP request for downloading this repo's tarball at its pinned commit.
+    ///
+    /// For private repos this uses the GitHub REST API endpoint (which requires
+    /// Bearer auth) and sets the appropriate headers. For public repos it uses
+    /// the direct archive URL.
+    fn tarball_request(&self) -> Result<ureq::RequestBuilder<WithoutBody>, LoadRepoError> {
         if self.auth {
-            let auth_token =
-                std::env::var("GITHUB_TOKEN").map_err(|_| LoadRepoError::MissingAuth)?;
-            let url_body = self
-                .repo_url
-                .trim_start_matches("https://")
-                .trim_start_matches("www.");
-            let add_dot_git = if self.repo_url.ends_with(".git") {
-                ""
-            } else {
-                ".git"
-            };
-
-            let auth_url = format!("https://{auth_token}:x-oauth-basic@{url_body}{add_dot_git}");
-            Ok(auth_url.into())
+            let token = std::env::var("GITHUB_TOKEN").map_err(|_| LoadRepoError::MissingAuth)?;
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/tarball/{}",
+                self.repo_org(),
+                self.repo_name(),
+                self.rev
+            );
+            Ok(ureq::get(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28"))
         } else {
-            Ok(self.repo_url.as_str().into())
+            let url = format!(
+                "{}/archive/{}.tar.gz",
+                self.repo_url.trim_end_matches('/'),
+                self.rev
+            );
+            Ok(ureq::get(&url))
         }
     }
 
-    /// Attempt to checkout/update this repo to the provided `cache_dir`.
+    /// Attempt to fetch this repo's sources into the provided `cache_dir`.
     ///
-    /// The repo will be checked out to '{cache_dir}/{repo_org}/{repo_name}',
-    /// and HEAD will be set to the `self.git_rev()`.
-    ///
-    /// Returns the path to the checkout on success.
-    ///
-    /// Returns an error if the repo cannot be cloned, the git rev cannot be
-    /// found, or if there is an io error.
+    /// Downloads the tarball for the pinned commit and extracts it to
+    /// `'{cache_dir}/{repo_org}/{repo_name}_{sha}'`. Returns that path on
+    /// success. If the directory already exists it is returned immediately
+    /// without re-fetching.
     pub fn instantiate(&self, cache_dir: &Path) -> Result<PathBuf, LoadRepoError> {
         let font_dir = self.repo_path(cache_dir);
 
-        if font_dir.exists() && !font_dir.join(".git").exists() {
-            log::debug!("{} exists but is not a repo, removing", font_dir.display());
-            if let Err(e) = std::fs::remove_dir(&font_dir) {
-                // we don't want to remove a non-empty directory, just in case
-                log::warn!("could not remove {}: '{e}'", font_dir.display());
-            }
+        if font_dir.exists() {
+            return Ok(font_dir);
         }
 
-        if !font_dir.exists() {
-            std::fs::create_dir_all(&font_dir)?;
-            let repo_url = self.repo_url_with_auth_token_if_needed()?;
-            log::info!("cloning {repo_url}");
-            super::clone_repo(&repo_url, &font_dir)?;
-        }
+        let request = self.tarball_request()?;
+        log::info!(
+            "fetching tarball for {}/{}",
+            self.repo_org(),
+            self.repo_name()
+        );
 
-        if !super::checkout_rev(&font_dir, &self.rev)? {
-            return Err(LoadRepoError::NoCommit {
-                sha: self.rev.clone(),
-            });
-        }
+        // Extract into a sibling temp dir then atomically rename to avoid
+        // leaving a partial directory on failure.
+        let parent = font_dir.parent().unwrap();
+        std::fs::create_dir_all(parent)?;
+        let tmp = tempfile::TempDir::new_in(parent)?;
+        fetch_tarball(request, tmp.path())?;
+        let tmp_path = tmp.keep();
+        std::fs::rename(&tmp_path, &font_dir)?;
+
         Ok(font_dir)
     }
 
@@ -247,6 +249,38 @@ impl FontSource {
 
         Ok(sources)
     }
+}
+
+/// Download a tarball from `url` and extract its contents into `target_dir`.
+///
+/// We previously used git for all of our interactions with repos, but shallow
+/// git checkouts are annoying to manage and don't work when we want to grab
+/// commits that are not on the main branch; likewise non-shallow clones can be
+/// enormous and take a lot of time.
+///
+/// This uses a (github-specific?) url scheme that lets us grab a tarball
+/// snapshot of the repository at a specific commit.
+fn fetch_tarball(
+    request: ureq::RequestBuilder<WithoutBody>,
+    target_dir: &Path,
+) -> Result<(), LoadRepoError> {
+    let response = request.call()?;
+    let mut body = response.into_body();
+    let gz = flate2::read::GzDecoder::new(body.as_reader());
+    let mut archive = tar::Archive::new(gz);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        // Skip the top-level directory entry itself; strip it from all paths.
+        let stripped: PathBuf = path.components().skip(1).collect();
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+        entry.unpack(target_dir.join(stripped))?;
+    }
+
+    Ok(())
 }
 
 fn repo_name_and_org_from_url(url: &str) -> Option<(&str, &str)> {
@@ -315,7 +349,9 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(
             sources[0],
-            temp_dir.path().join("danhhong/Nokora_9c5f991b70/Source/Nokora.glyphs")
+            temp_dir
+                .path()
+                .join("danhhong/Nokora_9c5f991b70/Source/Nokora.glyphs")
         );
     }
 }

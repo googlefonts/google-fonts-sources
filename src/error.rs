@@ -53,12 +53,11 @@ pub enum LoadRepoError {
         #[source]
         std::io::Error,
     ),
-    #[error(transparent)]
-    GitFail(#[from] GitFail),
-    /// The expected commit could not be found
-    #[error("could not find commit '{sha}'")]
-    NoCommit { sha: String },
-
+    #[error("failed to fetch tarball : {error}")]
+    FetchFailed {
+        #[from]
+        error: ureq::Error,
+    },
     /// No config file was found
     #[error("no config file was found")]
     NoConfig,
@@ -68,7 +67,7 @@ pub enum LoadRepoError {
         #[from]
         BadConfig,
     ),
-    #[error("reposity requires an auth token but GITHUB_TOKEN not set")]
+    #[error("repository requires an auth token but GITHUB_TOKEN not set")]
     MissingAuth,
 }
 
