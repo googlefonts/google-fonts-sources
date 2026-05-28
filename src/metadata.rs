@@ -103,7 +103,7 @@ impl FromStr for Metadata {
 
 // normalize the url, filtering out various things that aren't valid
 fn post_process_repo_url(url: &str) -> Option<String> {
-    let url = url.trim().trim_end_matches('/'); // trailing slash is not meaningful
+    let url = url.trim().trim_end_matches('/').trim_end_matches(".git"); // trailing slash and ".git" suffix are not meaningful
     if url.is_empty() {
         return None;
     }
@@ -215,6 +215,28 @@ mod tests {
             )
             .known_repo_url(),
             None
+        );
+        // strip trailing .git suffix
+        assert_eq!(
+            Metadata::new(
+                "hi".into(),
+                Some("https://github.com/aliftype/amiri.git"),
+                None,
+                None
+            )
+            .known_repo_url(),
+            Some("https://github.com/aliftype/amiri")
+        );
+        // strip trailing .git/ (.git followed by trailing slash)
+        assert_eq!(
+            Metadata::new(
+                "hi".into(),
+                Some("https://github.com/aliftype/amiri.git/"),
+                None,
+                None
+            )
+            .known_repo_url(),
+            Some("https://github.com/aliftype/amiri")
         );
     }
 }
