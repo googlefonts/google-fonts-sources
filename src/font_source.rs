@@ -158,12 +158,25 @@ impl FontSource {
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28"))
         } else {
-            let url = format!(
-                "{}/archive/{}.tar.gz",
-                self.repo_url.trim_end_matches('/'),
-                self.rev
-            );
-            Ok(ureq::get(&url))
+            Ok(ureq::get(&self.archive_url()))
+        }
+    }
+
+    /// The direct archive-tarball URL for a public repo at its pinned commit.
+    ///
+    /// GitHub and GitLab expose snapshot tarballs at different paths; the
+    /// top-level directory they wrap the contents in is stripped during
+    /// extraction (see [`fetch_tarball`]).
+    fn archive_url(&self) -> String {
+        let base = self.repo_url.trim_end_matches('/');
+        let rev = &self.rev;
+        if base.starts_with("https://gitlab.com") {
+            // e.g. https://gitlab.com/smc/fonts/manjari/-/archive/<rev>/manjari-<rev>.tar.gz
+            let name = self.repo_name();
+            format!("{base}/-/archive/{rev}/{name}-{rev}.tar.gz")
+        } else {
+            // GitHub (and API-compatible hosts).
+            format!("{base}/archive/{rev}.tar.gz")
         }
     }
 
@@ -336,6 +349,31 @@ mod tests {
     }
 
     #[test]
+    fn archive_url_github_vs_gitlab() {
+        let gh = FontSource::for_test(
+            "https://github.com/PaoloBiagini/Joan",
+            "abc1230000",
+            "sources/config.yaml",
+        );
+        assert_eq!(
+            gh.archive_url(),
+            "https://github.com/PaoloBiagini/Joan/archive/abc1230000.tar.gz"
+        );
+
+        // GitLab uses a different archive path, includes a filename, and may be
+        // nested under sub-groups (e.g. `smc/fonts/manjari`).
+        let gl = FontSource::for_test(
+            "https://gitlab.com/smc/fonts/manjari",
+            "abc1230000",
+            "sources/config.yaml",
+        );
+        assert_eq!(
+            gl.archive_url(),
+            "https://gitlab.com/smc/fonts/manjari/-/archive/abc1230000/manjari-abc1230000.tar.gz"
+        );
+    }
+
+    #[test]
     fn test_non_sources_config() {
         let source = FontSource::for_test(
             "https://github.com/danhhong/Nokora",
@@ -352,6 +390,25 @@ mod tests {
             temp_dir
                 .path()
                 .join("danhhong/Nokora_9c5f991b70/Source/Nokora.glyphs")
+        );
+    }
+
+    // end-to-end fetch of a GitLab-hosted repo (manjari lives under the
+    // `smc/fonts` sub-group on gitlab.com), exercising the GitLab archive URL.
+    #[test]
+    fn gitlab_instantiate() {
+        let source = FontSource::for_test(
+            "https://gitlab.com/smc/fonts/manjari",
+            "8948773e572ce0b58d93b0f120f561a0b02e9853",
+            "sources/config.yaml",
+        );
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = source
+            .instantiate(temp_dir.path())
+            .expect("should fetch a GitLab repo tarball");
+        assert!(
+            dir.join("sources/Manjari-Bold.ufo/metainfo.plist").exists(),
+            "expected the UFO source to be extracted from the GitLab tarball"
         );
     }
 }
