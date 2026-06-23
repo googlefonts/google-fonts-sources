@@ -55,17 +55,17 @@ impl Metadata {
     ///
     /// (used for logging)
     pub fn unknown_repo_url(&self) -> Option<&str> {
-        self.repo_url.as_deref().filter(|s| {
-            !s.starts_with("https://github.com") || ureq::http::Uri::from_str(s).is_err()
-        })
+        self.repo_url
+            .as_deref()
+            .filter(|s| !is_known_host(s) || ureq::http::Uri::from_str(s).is_err())
     }
 
-    /// If we have a repo_url and it is a host we know (github) use it
+    /// If we have a repo_url and it is a host we know (github or gitlab) use it
     #[cfg(test)]
     fn known_repo_url(&self) -> Option<&str> {
         self.repo_url
             .as_deref()
-            .filter(|s| s.starts_with("https://github.com") && ureq::http::Uri::from_str(s).is_ok())
+            .filter(|s| is_known_host(s) && ureq::http::Uri::from_str(s).is_ok())
     }
 }
 
@@ -109,12 +109,19 @@ fn post_process_repo_url(url: &str) -> Option<String> {
     }
     let url = if let Some(suffix) = url.strip_prefix("https://www.github") {
         format!("https://github{suffix}") // remove www if present
-    } else if url.starts_with("github") {
+    } else if let Some(suffix) = url.strip_prefix("https://www.gitlab") {
+        format!("https://gitlab{suffix}") // remove www if present
+    } else if url.starts_with("github") || url.starts_with("gitlab") {
         format!("https://{url}") // we've seen this once at least..
     } else {
         url.to_owned()
     };
     Some(url)
+}
+
+/// Hosts we know how to download a source tarball from at a specific commit.
+fn is_known_host(url: &str) -> bool {
+    url.starts_with("https://github.com") || url.starts_with("https://gitlab.com")
 }
 
 /// extract the contents of a string literal, e.g. the stuff between the quotation marks
@@ -194,7 +201,7 @@ mod tests {
             .known_repo_url(),
             Some("https://github.com/hi/mom")
         );
-        // ignore gitlab
+        // gitlab is also a known host (and www is removed)
         assert_eq!(
             Metadata::new(
                 "hi".into(),
@@ -203,7 +210,7 @@ mod tests {
                 None
             )
             .known_repo_url(),
-            None
+            Some("https://gitlab.com/hi/mom")
         );
         // ignore invalid urls
         assert_eq!(
